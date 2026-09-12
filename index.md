@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Operating Systems
   text: CSC3150 · Fall 2026
-  tagline: Lecture notes with key slides, runnable demos, and self-checks
+  tagline: Key slides, runnable demos, self-checks
 ---
 
 <div class="lec-grid">

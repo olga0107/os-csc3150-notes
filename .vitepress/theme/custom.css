@@ -35,6 +35,14 @@
 }
 
 /* 首页 lecture 目录 */
+/* hero tagline 一行展示，不被主题默认宽度截断 */
+@media (min-width: 768px) {
+  .VPHero .tagline {
+    max-width: none;
+    white-space: nowrap;
+  }
+}
+
 .lec-grid {
   max-width: 720px;
   margin: 24px auto 64px;
