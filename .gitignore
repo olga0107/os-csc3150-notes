@@ -1,0 +1,15 @@
+node_modules/
+.vitepress/dist/
+.vitepress/cache/
+.DS_Store
+
+# 内部工作文档与课件原件，不对外发布
+AGENTS.md
+*.pdf
+
+# demo 编译产物与运行残留
+demos/**/*.txt
+demos/**/cpu
+demos/**/memory
+demos/**/segments
+demos/**/stack-vs-heap

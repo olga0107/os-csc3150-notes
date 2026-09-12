@@ -1,0 +1,87 @@
+/* 章节之间拉开距离，让层级一眼可辨 */
+.vp-doc h2 {
+  margin-top: 72px;
+  font-size: 1.7em;
+}
+
+.vp-doc h3 {
+  margin-top: 48px;
+}
+
+.vp-doc h4 {
+  margin-top: 32px;
+}
+
+.vp-doc hr {
+  margin: 56px 0;
+}
+
+/* 幻灯片配图：圆角 + 轻阴影，和正文区分开 */
+.vp-doc p > img {
+  border-radius: 10px;
+  border: 1px solid var(--vp-c-divider);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+}
+
+/* 引用块（定义、提示）更醒目 */
+.vp-doc blockquote {
+  border-radius: 8px;
+  background-color: var(--vp-c-bg-soft);
+  padding: 12px 16px;
+}
+
+.vp-doc blockquote > p {
+  margin: 4px 0;
+}
+
+/* 首页 lecture 目录 */
+.lec-grid {
+  max-width: 720px;
+  margin: 24px auto 64px;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.lec-card {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 20px 26px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  text-decoration: none !important;
+  color: var(--vp-c-text-1) !important;
+  transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
+}
+
+.lec-card:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.lec-num {
+  font-size: 2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--vp-c-brand-1);
+  line-height: 1;
+}
+
+.lec-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lec-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.lec-sub {
+  font-size: 0.85rem;
+  color: var(--vp-c-text-2);
+}
