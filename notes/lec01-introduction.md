@@ -59,6 +59,10 @@ Original Unix: **4,501 LoC**. Linux 5.6: **27.8 M**. A modern car: **~100 M**. �
 
 > The OS implements a **virtual machine** per application whose interface is *more convenient* than raw hardware. Convenient means **portable, reliable, secure**.
 
+![OS implements a virtual machine per application](../assets/lec01/page25.png)
+
+图里每个 Application 框看到的不是下面的 Hardware，而是 OS 提供给它的那台"更好用的虚拟机"，接口更 convenient（portable、reliable、secure）。
+
 v1 说"OS 共享硬件"，v2 说"OS **改变硬件看起来的样子**"。从 v1 到 v2 的视角转换是整门课的钥匙。
 
 ***
@@ -97,6 +101,10 @@ int main(int argc, char *argv[]) {
 ```
 
 这个程序一旦启动就**永远不会自己结束**，是观察 OS 行为的完美"探针"。
+
+![cpu.c code, output options, and a segfault](../assets/lec01/page30.png)
+
+这张图的信息量很大：右上是单进程运行，全是 `A`；中间 a/b/c 是三个候选输出（全 A / 整齐 `ABCABC` / 无规律混合）；最下面还藏着一个小实验，`./cpu & ; ./cpu B` 直接 **Segmentation Fault**，因为第一条命令没带参数，`argv[1]` 不存在。
 
 > ⚠️ 这段代码其实**不安全**：直接访问 `argv[1]` 却没有检查 `argc`。不带参数运行 `./cpu`，`argv[1]` 根本不存在，程序立刻 segfault。这里为了演示故意从简，正经代码必须先判 `argc >= 2`。
 
@@ -157,6 +165,10 @@ while (1) { *p += 1; printf("(%d) p: %d\n", getpid(), *p); }   /* 反复给 *p �
 `getpid()` 返回的 PID 是 OS 给每个进程分配的身份证号。课后可以在终端跑 `ps` 亲眼看看：系统里每个进程都有自己的 PID，Chrome 每开一个 tab 就多一个进程。
 
 **先预测**：两个进程打印同一个地址，各自的计数器会怎样？混在一起互相覆盖，还是各自独立增长？
+
+![memory.c code and two prediction options](../assets/lec01/page34.png)
+
+a) 是"共享内存"的预测：计数器交叉混成 1, 2, 3, 4, 5, 6。b) 是"各自独立"的预测：两边各数各的 1, 2, 3。右上已经剧透了关键事实：两个进程 PID 不同（120 和 254），打印的地址却都是 `0x200000`。
 
 **The experiment**（本机真实运行，两个进程同时跑）:
 

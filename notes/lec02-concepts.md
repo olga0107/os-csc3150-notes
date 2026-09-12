@@ -63,6 +63,12 @@ next: false
 
 ### 3.2 CPU 内部：Fetch / Decode / Execute 循环
 
+先看数据通路，这是整个循环的硬件底图：
+
+![Instruction fetch/decode/execute data path](../assets/lec02/page11.png)
+
+Processor 一侧，**Program counter** 指着内存里的 `instruction`，fetch 取进来，**decode** 译码，然后交给 **Execute**（漏斗形的 ALU）结合 **Registers** 里的数据运算，结果可以写回寄存器，也可以写进内存的 `data` 区。注意右侧黄色的 Memory 是**一整块**：instruction 和 data 住在同一块内存里，下一张图会展开这个性质。
+
 ![Instruction cycle](../assets/lec02/page13.png)
 
 * Processor 里的寄存器分三类：**R0…R31**（32 个通用寄存器）、**F0…F30**（浮点寄存器）、**PC**（program counter）。寄存器里装的是整数、指针这类小数据，SP（stack pointer）就是一个指向栈顶地址的指针。数量上，一台机器通常有 32 或 64 个通用寄存器。
@@ -179,6 +185,10 @@ stack  (local):   0x16fd5a648     ← 远远最高
 * OS 保护自己不被进程伤害
 * 代价：**protection 和 efficiency 天生矛盾**。同进程内通信很容易（共享内存直接读写），跨进程通信必须走 OS 提供的 pipe/socket 等机制。
 
+![Multiprogramming: multiple processes](../assets/lec02/page21.png)
+
+**Multiprogramming**（多道程序设计）的画面：左边 P1、P2 … Pn 坐在 OS 之上；右边的物理内存里，每个进程各自占一套完整的四段布局（code / static data / heap / stack，各自的颜色互不重叠）。多个进程同时在内存里"备场"，CPU 在它们之间切换，这就是下一节"单核变出多个处理器"的布景。
+
 ### 单核如何变出多个处理器
 
 ![Illusion of multiple processors](../assets/lec02/page22.png)
@@ -284,6 +294,12 @@ Syscall 有个精妙之处：它**像函数调用，但进程手里没有内核�
 ## 9. Base & Bound: 最朴素的内存保护方案
 
 理解了 dual mode，来看早期 OS 怎么用它做内存保护。思想极简：给每个进程划一段连续物理内存，用两个寄存器看住它。
+
+在具体方案之前，先看这张抽象模型，它是整个内存保护章节的骨架：
+
+![Address space translation](../assets/lec02/page35.png)
+
+**Processor 和 Memory 之间夹了一个 Translator**。CPU 发出的每个地址都是 "virtual address"，经 Translator 变成 "physical address" 后才真正碰到内存。程序活在和物理内存**不同**的地址空间里，Translator 守在访存的必经之路上：想访问哪、能不能访问，都要先过它这关。Base & Bound 就是这个 Translator 最朴素的实现。
 
 ### 9.1 版本 A：加载时翻译（static relocation）
 
