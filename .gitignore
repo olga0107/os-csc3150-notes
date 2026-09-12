@@ -6,6 +6,7 @@ node_modules/
 # 内部工作文档与课件原件，不对外发布
 AGENTS.md
 *.pdf
+.inbox/
 
 # demo 编译产物与运行残留
 demos/**/*.txt

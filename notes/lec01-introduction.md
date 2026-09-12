@@ -6,7 +6,16 @@
 
 ***
 
-## 1. Why is OS design so hard?
+## 1. Why learn OS at all?
+
+核心问题：这门课和我有什么关系？
+
+* **Every program you will ever write runs on an OS.** 程序的性能和行为不只由你的代码决定，还取决于底层 OS 怎么调度、怎么管内存。想真正优化一个程序，就得理解它脚下这一层。
+* **跨平台体感**：同一份逻辑跑在手机、电脑、IoT 设备上，行为差异会非常明显。懂 OS 才知道这些差异从哪来。
+
+***
+
+## 2. Why is OS design so hard?
 
 核心问题：为什么写一个 OS 比写普通软件难得多？
 
@@ -16,23 +25,29 @@
 
 Roughly **every 10 years a new device class appears**: mainframe → PC → laptop → cell → cloud/IoT. Each one forces the OS to be rethought. OS 设计永远赶不上硬件形态的演化。
 
+换个角度读这条定律，就是**人均设备数**的变化：从每百万人共享一台计算机，到每人一台，再到今天每人多台（家里的灯泡、空调里都是计算机）。下一个十年，这个数还会涨一个量级。
+
 ### b) One OS spans ~8 orders of magnitude in time
 
 ![Jeff Dean's numbers](../assets/lec01/page20.png)
 
 L1 cache reference costs **0.5 ns**; a CA↔Netherlands packet round trip costs **150,000,000 ns**. The OS must make correct decisions at *every* scale in between. 从纳秒级缓存到百毫秒级网络，调度策略没法"一刀切"。
 
+不协调的代价很具体：**快任务会被慢任务挡住**，延迟被放大上百万倍。OS 就是在这 8 个数量级之间做协调的那一层。
+
 ### c) Complexity keeps exploding
 
 ![Lines of code growth](../assets/lec01/page21.png)
 
-Original Unix: **4,501 LoC**. Linux 5.6: **27.8 M**. A modern car: **~100 M**.
+Original Unix: **4,501 LoC**. Linux 5.6: **27.8 M**. A modern car: **~100 M**. 课堂补充的数据点：Firefox 数百万行（浏览器大到有人争论它今天算不算一个 OS）、初代 Android 约 1000 万行、Windows 7 约 4000 万行、macOS 接近 1 亿行。车载代码量大有原因：大部分是安全性代码，车不能随便 crash。
 
 背后的驱动力：smarter hardware、higher reliability/security/efficiency expectations、以及永远不会消失的 legacy interfaces。
 
+而且这个趋势不会停：过去程序员刻意控制代码量，是为了人能读懂、能维护；**AI agent 写代码不在乎可读性**，"能塞多少塞多少"，未来 OS 的复杂度只会涨得更快。
+
 ***
 
-## 2. So, what *is* an OS?
+## 3. So, what *is* an OS?
 
 **Definition v1: the resource layer**
 
@@ -48,11 +63,11 @@ v1 说"OS 共享硬件"，v2 说"OS **改变硬件看起来的样子**"。从 v1
 
 ***
 
-## 3. Three hats of an OS
+## 4. Three hats of an OS
 
 ![Referee / Illusionist / Glue](../assets/lec01/page27.png)
 
-### 3.1 Referee 🟥 protection, isolation, sharing
+### 4.1 Referee 🟥 protection, isolation, sharing
 
 核心问题：多个**互不信任**的程序如何同时安全地跑？
 
@@ -61,12 +76,16 @@ v1 说"OS 共享硬件"，v2 说"OS **改变硬件看起来的样子**"。从 v1
 | Concern | Question | Mechanism（后续章节展开） |
 | ---------------- | ------------------- | -------------------------------- |
 | Fault isolation | 程序之间、程序与 OS 之间如何隔离？ | Process, **dual-mode execution** |
-| Resource sharing | 下一个跑谁？物理资源怎么分？ | Scheduling |
+| Resource sharing | 下一个跑谁？物理资源怎么分？（1 TB 内存怎么分给 1000 个任务？平均分吗？） | Scheduling |
 | Communication | 程序间如何安全地交换结果？ | Pipes / sockets |
+
+Communication 的体感例子：你手动 copy-paste 两个程序间的数据，相当于**人自己当了总线**；Chrome 每个 tab 是独立进程，标签页之间要交换数据必须经 OS 协助。IPC（inter-process communication）解决的就是这件事。
 
 > 💡 **Dual-mode execution**：CPU 分 user mode 和 kernel mode。用户态程序不能直接碰硬件和别人的内存，危险操作必须经 **system call** 进入内核。这是"敢跑不可信程序"的硬件地基。
 
 #### Demo 1 · `cpu.c`: the many-CPUs illusion
+
+**先读懂参数**：`argc` 是命令行参数个数，`argv` 是参数数组。**`argv[0]` 永远是可执行文件自己的名字**，所以 `./cpu A` 时 argc = 2，`argv[1]` 才是 `"A"`。
 
 **What the code does**（逐行拆解）:
 
@@ -78,6 +97,14 @@ int main(int argc, char *argv[]) {
 ```
 
 这个程序一旦启动就**永远不会自己结束**，是观察 OS 行为的完美"探针"。
+
+> ⚠️ 这段代码其实**不安全**：直接访问 `argv[1]` 却没有检查 `argc`。不带参数运行 `./cpu`，`argv[1]` 根本不存在，程序立刻 segfault。这里为了演示故意从简，正经代码必须先判 `argc >= 2`。
+
+**先预测，再看结果**：三个死循环一起跑，输出会是什么样？
+
+* A：全是 `A`（谁先跑谁霸占 CPU）
+* B：整齐的 `ABCABC`
+* C：无规律混合
 
 **The experiment**:
 
@@ -92,6 +119,8 @@ Actual output captured on macOS（0.15 s 内的尾部切片）:
 A B A A C A C B C B B A C B C B B A B C B C B C B C B A B A A C A C B ...
 ```
 
+现代 OS 上答案是 **C**。但注意，**这个答案是"现代 OS"的答案**：回到 1980 年代，OS 一次只能跑一个任务，答案会是 A；在 Mac OS 9 / Win 3.1 这类 cooperative 系统上，答案同样是 A。选项和年代的对应关系，正是 preemptive scheduling 演化出来的证据。
+
 **How to read this output**:
 
 1. 三个程序各自陷入死循环。理论上谁"先跑"谁就该永远霸占 CPU，输出应该全是 `A`。
@@ -102,7 +131,7 @@ A B A A C A C B C B B A C B C B B A B C B C B C B C B A B A A C A C B ...
 
 > 💡 **Cooperative vs preemptive**：如果 OS 只能*等程序主动*交出 CPU，即 **cooperative multitasking**（Mac OS 9 / Win 3.1 时代），这个 `while(1)` 程序会永远霸住处理器，**整机卡死**。现代 OS 用 **preemptive multitasking**：timer interrupt 是硬件行为，不需要程序配合，OS 随时能夺回控制权。一个死循环最多占满它自己的时间片，拖不垮系统。
 
-### 3.2 Illusionist 🎩 hide hardware limits via virtualization
+### 4.2 Illusionist 🎩 hide hardware limits via virtualization
 
 核心问题：如何让每个程序都觉得自己独占一台无限强的机器？
 
@@ -110,18 +139,24 @@ A B A A C A C B C B B A C B C B B A B C B C B C B C B A B A A C A C B ...
 * **All powerful**: resources feel infinite
 * **All expressive**: capabilities that don't physically exist
 
+注意 all powerful 是假象而不是承诺：在一块智能手表上 `malloc` 100 GB，大概率失败，但*偶尔*真能成功（有 swap 和虚拟内存时）。假象的边界本身就是设计的艺术。
+
 #### Demo 2 · `memory.c`: the private-memory illusion
 
 **What the code does**（逐行拆解）:
 
 ```c
-int *p = malloc(sizeof(int));              /* 堆上申请 4 字节，p 存其地址 */
+int *p = malloc(sizeof(int));              /* 堆上申请 4 字节，p 存其地址；malloc ≈ C++ 的 new */
 printf("(%d) p: %p\n", getpid(), p);       /* getpid() = 进程 ID；%p 打印 p 里的地址值 */
 *p = 0;
 while (1) { *p += 1; printf("(%d) p: %d\n", getpid(), *p); }   /* 反复给 *p 加 1 并打印 */
 ```
 
 注意区分两个东西：`p` 是**地址**（这 4 字节"在哪里"），`*p` 是**值**（那 4 字节里"存了什么"）。
+
+`getpid()` 返回的 PID 是 OS 给每个进程分配的身份证号。课后可以在终端跑 `ps` 亲眼看看：系统里每个进程都有自己的 PID，Chrome 每开一个 tab 就多一个进程。
+
+**先预测**：两个进程打印同一个地址，各自的计数器会怎样？混在一起互相覆盖，还是各自独立增长？
 
 **The experiment**（本机真实运行，两个进程同时跑）:
 
@@ -140,11 +175,13 @@ while (1) { *p += 1; printf("(%d) p: %d\n", getpid(), *p); }   /* 反复给 *p �
 
 **反向验证**：如果没有 virtual memory，任何程序的一个野指针 bug 就可能改写别的进程、甚至内核的内存，multiprogramming（多程序共存）根本不可能安全实现。这也是为什么 virtual memory 是 Referee（隔离）和 Illusionist（假象）两顶帽子的交汇点。
 
-### 3.3 Glue 🩹 common services
+### 4.3 Glue 🩹 common services
 
 核心问题：如何避免每个程序都重造轮子？
 
 File system、UI、networking 等标准服务带来三个好处：sharing easier（大家用同一套 primitives）、reuse maximized、components evolve independently。
+
+三顶帽子之外记住一个定位：**OS 终究是应用的仆人（servant）**。裁判、魔术师、胶水，所有机制最终都是为应用服务的。
 
 ### Putting it together
 
@@ -154,7 +191,7 @@ File system、UI、networking 等标准服务带来三个好处：sharing easier
 
 ***
 
-## 4. How do we judge an OS?
+## 5. How do we judge an OS?
 
 核心问题："好 OS"的标准是什么？abstractions must be **efficient, low-overhead, equitable**。
 
@@ -167,6 +204,8 @@ File system、UI、networking 等标准服务带来三个好处：sharing easier
 | Security | 攻击下维持正常功能 | integrity + privacy |
 | Performance | 满足用户与管理员预期 | response time, throughput, predictability |
 
+Reliability 有一个现实锚点：**2024 年 7 月 19 日的 CrowdStrike 事件**。一个安全软件的故障更新让全球约 850 万台 Windows 机器蓝屏，机场值机、医院、银行大面积停摆，被称为史上最大规模的 IT 事故。这就是为什么 OS 级故障是 catastrophic 的，也解释了为什么要同时量化两个指标：**MTTF**（mean time to failure，多久坏一次）和 **MTTR**（mean time to repair，坏了多久能修好）。故障不可能完全避免时，修得快和坏得少同样重要。
+
 Portability 值得单独看，它解释了所有现代 OS 的分层设计：
 
 ![AMI and HAL](../assets/lec01/page39.png)
@@ -177,9 +216,11 @@ Portability 值得单独看，它解释了所有现代 OS 的分层设计：
 
 ***
 
-## 5. Why this course matters more in the AI age
+## 6. Why this course matters more in the AI age
 
 Rich Sutton (Turing Award 2024), *The Bitter Lesson*: **handcrafted knowledge plateaus; learning + search scale with computation.**
+
+国际象棋是最好的例证：早期人们把手写的下棋技巧塞进机器，全部撞上瓶颈；只有等算力增长、让机器自己学，才真正成功。这条脉络一路从 AlphaGo 走到 deep learning 再到今天的 LLM。
 
 本课的补充视角：**systems unlock that computation**。
 
@@ -191,7 +232,7 @@ AI 训练需求每 18 个月涨 **10×**，Moore's Law 只给 **2×**，缺口�
 
 ***
 
-## 6. Self-check
+## 7. Self-check
 
 1. 用一句话向没学过 CS 的人解释 OS 是什么。
 2. `memory.c` 里两个进程地址相同却互不干扰，靠的是什么机制？如果关掉它会发生什么？
