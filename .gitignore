@@ -14,3 +14,5 @@ demos/**/cpu
 demos/**/memory
 demos/**/segments
 demos/**/stack-vs-heap
+demos/**/pthread_demo
+demos/**/pointer_demo

@@ -12,6 +12,7 @@ Style: English-first with concise Chinese annotations; technical terms and code 
 |---|-------|------|
 | 1 | What is an OS? Three roles (referee / illusionist / glue), evaluation criteria, OS in the AI age | [lec01-introduction](notes/lec01-introduction.md) |
 | 2 | Four fundamental concepts: thread, address space, process, dual mode, base & bound protection | [lec02-concepts](notes/lec02-concepts.md) |
+| 3 | Threads & processes: control transfers, interrupt vector, PCB & scheduler, pthread API, race condition | [lec03-thread-process](notes/lec03-thread-process.md) |
 
 ## Course links
 

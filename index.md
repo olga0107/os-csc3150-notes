@@ -22,4 +22,11 @@ hero:
       <span class="lec-sub">Thread · address space · process · dual mode · base & bound</span>
     </div>
   </a>
+  <a class="lec-card" href="./notes/lec03-thread-process">
+    <span class="lec-num">03</span>
+    <div class="lec-body">
+      <span class="lec-title">Threads & Processes</span>
+      <span class="lec-sub">Syscall / interrupt / trap · interrupt vector · PCB & scheduler · pthread · race condition</span>
+    </div>
+  </a>
 </div>

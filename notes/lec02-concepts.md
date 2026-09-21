@@ -1,7 +1,3 @@
----
-next: false
----
-
 # Lecture 2 · Four Fundamental Concepts: Thread, Address Space, Process, Dual Mode
 
 > CSC3150 · CUHK-Shenzhen · Fall 2026 · Slides adapted from Berkeley CS 162
