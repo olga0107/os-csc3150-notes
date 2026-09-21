@@ -24,7 +24,8 @@ export default defineConfig({
         items: [
           { text: 'Lec 01 · Introduction', link: '/notes/lec01-introduction' },
           { text: 'Lec 02 · Four Concepts', link: '/notes/lec02-concepts' },
-          { text: 'Lec 03 · Threads & Processes', link: '/notes/lec03-thread-process' }
+          { text: 'Lec 03 · Threads & Processes', link: '/notes/lec03-thread-process' },
+          { text: 'Lec 04 · Process API & Locks', link: '/notes/lec04-process' }
         ]
       },
       {

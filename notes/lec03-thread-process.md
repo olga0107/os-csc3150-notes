@@ -1,5 +1,7 @@
 ---
-next: false
+next:
+  text: 'Lec 04 · Process API & Locks'
+  link: '/notes/lec04-process'
 ---
 
 # Lecture 3 · Threads and Processes: A Programmer's Viewpoint

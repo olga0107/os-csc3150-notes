@@ -16,3 +16,11 @@ demos/**/segments
 demos/**/stack-vs-heap
 demos/**/pthread_demo
 demos/**/pointer_demo
+demos/**/fork1
+demos/**/fork2
+demos/**/fork_race
+demos/**/inf_loop
+demos/lec04/fork1.c
+demos/lec04/fork2.c
+demos/lec04/fork_race.c
+demos/lec04/inf_loop.c

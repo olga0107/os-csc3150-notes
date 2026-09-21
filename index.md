@@ -29,4 +29,11 @@ hero:
       <span class="lec-sub">Syscall / interrupt / trap · interrupt vector · PCB & scheduler · pthread · race condition</span>
     </div>
   </a>
+  <a class="lec-card" href="./notes/lec04-process">
+    <span class="lec-num">04</span>
+    <div class="lec-body">
+      <span class="lec-title">Process API & Locks</span>
+      <span class="lec-sub">Interleaving · race condition · lock · fork / exec / wait · signals · shell pattern</span>
+    </div>
+  </a>
 </div>
