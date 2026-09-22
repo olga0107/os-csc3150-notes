@@ -1,10 +1,10 @@
 # CSC3150 Operating Systems · Lecture Notes
 
-Personal lecture notes for **CSC3150 Operating Systems** (CUHK-Shenzhen, Fall 2026).
+Study and revision notes for **CSC3150 Operating Systems** (CUHK-Shenzhen, Fall 2026).
 
 Read online: **https://olga0107.github.io/os-csc3150-notes/**
 
-Style: English-first with concise Chinese annotations; technical terms and code stay in English. Each note follows the lecture's own logic. Sections open with the core question being solved, concepts are rewritten in my own words, and notes end with self-check questions for active recall. Key slides are extracted as images under `assets/<lecture>/`.
+Style: English technical terms and code, with Chinese explanations that break difficult mechanisms into small steps. Each note follows the lecture's own logic. Sections open with the core question being solved, concepts are explained through execution traces and worked examples, and notes end with self-check questions for active recall. Supporting slide diagrams are extracted as images under `assets/<lecture>/`.
 
 ## Index
 

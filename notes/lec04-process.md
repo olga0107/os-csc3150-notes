@@ -1,685 +1,727 @@
 ---
+prev:
+  text: 'Lecture 3 · Threads & Processes'
+  link: /notes/lec03-thread-process
 next: false
 ---
+# Lecture 4 · 同步与进程 {#lecture-4-·-shared-data-and-process-lifecycle}
 
-# Lecture 4 · Processes
+**TL;DR**
 
-> CSC3150 · CUHK-Shenzhen · Fall 2026 · Slides adapted from Berkeley CS 162
+- Mutex 让冲突操作轮流进入临界区，保护共享数据。
+- Fork 创建子进程，exec 让当前进程换一个程序运行，wait 让父进程取得子进程的终止信息。
+- Signal 用来通知进程处理事件，收到后做什么取决于信号种类和处理设置。
 
-**TL;DR**: 这讲分两半。前半：多个线程同时改同一份数据会出错（race condition），出错的根源是"你不知道自己会在哪一句被打断"，解药是 lock。后半：进程怎么生、怎么死、怎么变身、怎么被管（`fork` / `exec` / `wait` / `exit` / `kill` / `sigaction`），学完后能完整解释 shell 每执行一条命令时发生了什么。
+## 1. 同步与锁 {#_1-synchronization-·-共享数据如何保持正确}
 
-***
+**核心问题：任意执行交错下，怎样保护一项完整更新？**
 
-## 1. 复习：线程与内存布局
+### 执行交错 {#interleaving-·-先确定执行顺序}
 
-核心问题：后半讲大量使用"进程 vs 线程"的对比，先把这两个概念钉牢。
+**核心问题：为什么不能假设一个线程把一行代码执行完才轮到另一个？**
 
-### 1.1 三个 pthread API
+![Threads scheduled on processors](../assets/lec04/page06.png)
 
-```c
-int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
-                   void *(*start_routine)(void*), void *arg);
-void pthread_exit(void *value_ptr);
-int pthread_join(pthread_t thread, void **value_ptr);
+例如有 5 个线程，却只有 2 个 CPU 执行位置：
+
+- 某一时刻只能有 2 个线程正在执行，其他可运行的线程要等待。
+- 一段时间后，OS 可以暂停其中一个，让等待的线程接着运行。
+- 程序不能假定“线程 A 总比 B 快”或“A 创建得早，所以一定先完成”。
+
+**一行 C 代码也不一定是一个不可拆开的动作。** 例如 `x = x + 1` 可能先读 x，再加 1，最后写回；中间就可能穿插其他线程的操作。
+
+![Execution can pause between steps](../assets/lec04/page07.png)
+
+- 同一 thread 的某段代码可能连续执行，也可能执行一部分后暂停。
+- 暂停期间，其他 threads 可以改变共享状态；恢复后继续执行不等于外部条件保持原样。
+- 分析正确性要覆盖允许的交错，不能把某次看到的调度顺序当成保证。
+
+![Serial, parallel, interleaved execution](../assets/lec04/page08.png)
+
+Serial 表示一项完成再做另一项；interleaving 表示交替推进；parallel execution 表示同一时刻执行不同工作。单核仍然可能出现共享数据的 race，增加 CPU 数量不是 race 的必要条件。
+
+三种排列不是三段不同的源代码，而是同一组线程可能得到的运行安排：
+
+- **a：先后完成**。Thread 1 先结束，再轮到 2、3；并发程序也可能恰好出现这种执行。
+- **b：时间重叠**。多个处理器执行不同线程，才能真正同时计算。
+- **c：分段交错**。每条线程分成多段，暂停的位置和每段长度都不固定，也不保证总按 1、2、3 轮转。
+
+因此需要证明的是“允许的安排都不会破坏结果”，而不是“这次机器恰好按期望顺序执行了”。
+
+**逐步推演：x 为什么可能是 1、3、5？**
+
+**核心问题：写入发生的时间如何改变读取结果？**
+
+先按一个简化模型推演：x、y 起初都是 0，每次读取或写入看成不可拆开的动作，各线程内部仍按代码顺序执行。下面是伪代码，不是可以直接照抄的无锁 C 程序。
+
+**只追踪一个问题：A 读取 y 的那一刻，B 已经做到哪一步？**
+
+```text
+Thread A             Thread B
+x = y + 1            y = 2
+                     y = y * 2
 ```
 
-不用背函数签名，只要看懂参数上的**箭头方向**：
+| A reads y | Why | Final x |
+|---|---|---|
+| 0 | B 尚未写入 | 1 |
+| 2 | B 完成第一句，未完成第二句 | 3 |
+| 4 | B 完成两句 | 5 |
 
-* `pthread_create` 的 `thread` 是**输出**：传一个空口袋进去，OS 把新线程的 id 装进去。之后拿着这个 id 去 `pthread_join`，它又变成**输入**。
-* `pthread_exit` 的 `value_ptr` 是**输入**：线程退场时交出的答卷。
-* `pthread_join` 的 `value_ptr` 是**输出**：收卷人在这里拿到那份答卷。
+若 A 改成 `x = 1`，B 仍只修改 y，x 就始终为 1。先确认“哪个线程写哪个变量”，再枚举顺序。
 
-三个函数合起来就是一句话：**创建、交卷、收卷**。
+> 💡 以上结果属于明确的教学模型。直接用普通 C globals 写出相同的无同步代码，会产生 data race，不能声称 C 只允许这三个结果。`volatile` 也不能代替线程同步。
 
-### 1.2 进程和线程，到底谁装谁
+### 插入为什么丢失 {#race-condition-·-bst-插入为何丢失}
 
-* **进程**是一个"资源包"：一块私有内存（address space）+ 打开的文件 + 其他资源。
-* **线程**是住在进程里的"执行流"：真正在 CPU 上跑指令的是线程，不是进程。
+**核心问题：为什么只保护最后一次赋值，仍可能损坏一个操作？**
 
-同进程内的多个线程，共享和私有分得很清楚：
+![Concurrent BST insertion](../assets/lec04/page12.png)
 
-| 共享（全进程一份） | 私有（每线程一份） |
+**BST（binary search tree，二叉搜索树）** 的规则是：一个节点左侧子树的值比它小，右侧子树的值比它大。插入新值时，就按大小一路寻找空位置。
+
+以插入 3 为例：
+
+1. `3 < 13`，从 13 向左到 8。
+2. `3 < 8`，向左到 1。
+3. `3 > 1`，向右到 6。
+4. `3 < 6`，应该继续向左；这里为空，就准备放入新节点。
+
+插入 4 也会走到同一个空位置。`6.left` 表示节点 6 通向左孩子的链接；`NULL` 表示目前没有左孩子。
+
+**问题出在：两个线程可能都在对方写入之前，看到了“这里为空”。**
+
+| Step | Insert(3) | Insert(4) |
+|---|---|---|
+| 1 | 搜索到 6.left 为空 | |
+| 2 | | 也观察到 6.left 为空 |
+| 3 | 将 6.left 指向新节点 3 | |
+| 4 | | 将 6.left 改成指向新节点 4 |
+
+最后 `6.left` 只指向 4。从树根沿链接往下找，已经找不到刚插入的 3。
+
+两个线程分别执行时都可能正确，交错后却丢了一个结果。这就是这里的 **race condition（竞态条件）**：结果依赖于它们碰巧怎样交错。
+
+**“创建了节点”为什么仍可能丢失插入？** 要区分节点对象和树中的链接：
+
+```text
+A 写入后：6.left → 节点 3
+B 写入后：6.left → 节点 4      节点 3 不再通过这条链接连在树上
+```
+
+创建节点只得到一块保存值的内存；把它接到树上，靠的是修改父节点中的 pointer。6 只有一个 left 字段，后一次赋值会覆盖前一次。节点 3 未必被释放，但已经不能通过这棵树的链接找到，插入结果就丢了。
+
+**这一操作要保证：插入成功的 3 和 4 都留在树里，而且位置符合大小规则。** 这种需要维持的性质叫 invariant（不变量）。
+
+只保护最后的赋值还不够：即使两次赋值轮流执行，第二个线程仍可能拿着之前“这里为空”的旧判断覆盖链接。因此，要把“寻找位置 + 修改链接”一起保护。
+
+### 互斥锁 {#mutex-·-保护完整操作}
+
+**核心问题：怎样让一整个逻辑操作不被另一个冲突操作插进来？**
+
+继续用插入 3 和 4 的例子：
+
+1. A 先取得保护这棵树的锁。
+2. A 从查找位置到插入 3 一起完成；B 想进行冲突操作，必须先等。
+3. A 释放锁，B 才能取得它。
+4. B 从更新后的树重新查找位置，再插入 4，所以不会覆盖 3。
+
+| Term | 在这个例子中是什么意思？ |
 |---|---|
-| code（机器码） | registers（寄存器现场，含 PC） |
-| static data（全局变量） | stack（局部变量、调用链） |
-| heap（`malloc` 的内存） | |
-| 打开的文件 | |
+| Synchronization（同步） | 协调 A、B 怎样访问共享的树 |
+| Mutual exclusion（互斥） | 同一时刻只允许一个线程执行受保护的操作 |
+| Critical section（临界区） | 需要一起保护的“查找 + 插入”代码 |
+| Mutex（互斥锁） | 用来实施这个进入规则的对象 |
 
-> 💡 **线程的寄存器存在哪？** 不存在进程自己的内存里，而是存在 OS 手里：每个线程有一份 **TCB（Thread Control Block）**，线程被切下去时寄存器现场存进 TCB，切回来时从 TCB 恢复。所以线程永远碰不到别的线程的寄存器。
-
-### 1.3 两个线程时的内存长什么样
-
-![Memory layout with two threads](../assets/lec04/page04.png)
-
-和单线程的布局一样：code、static data、heap（向下长）依次排开，区别只是顶部有**两块** stack，各占一段、各自向上长。
-
-这里埋了几个后面才回答的问题：两块 stack 怎么摆、各给多大、一个线程写疯了越过自己的 stack 会怎样、OS 怎么抓住这种越界。答案在 virtual memory 章节。
-
-***
-
-## 2. Interleaving
-
-核心问题：为什么多线程程序"这次跑对、下次跑错"，而且靠测试抓不出来？
-
-### 2.1 一个善意的谎言
-
-写代码时的默认脑补是：每个线程像一个独立的工人，各自按顺序干活，互不打扰。物理现实是另一回事：
-
-![Thread abstraction vs physical reality](../assets/lec04/page06.png)
-
-* **程序员看到的假象**：5 个线程配 5 个处理器，一人一台，从容执行。
-* **真实世界**：只有 2 个处理器。任意瞬间最多 2 个线程在跑（running），剩下 3 个在排队（ready）。
-
-OS 的 scheduler 不停地把线程换上去、切下来，制造"大家都在同时推进"的假象。
-
-### 2.2 三条必须接受的铁律
-
-1. **切换可以发生在任意两条语句之间**。线程跑到任何一句都可能被暂停，换成别人跑，过一会儿再轮到它。
-2. **"一行代码"也不是安全的**。`x = y + 1` 这一行 C，编译后是"读 y、加 1、写 x"三条机器指令，切换可以插进这三条之间的任何缝隙。
-3. **切换的时机完全不可预测**。调度算法对程序员不可见，这次运行和下次运行的切换方式可以完全不同。
-
-类比：几个人接力填写同一张表格，任何人随时可能被叫停、换人接着填，换人时机不可预知。填写者没法预测自己会在哪一格被打断，只能保证"无论在哪被打断，恢复后都能接着填对"。
-
-### 2.3 同一个程序，三种命运
-
-![Possible executions](../assets/lec04/page08.png)
-
-同一份代码跑三次，时间线上可能是：
-
-* (a) 三个线程依次跑完，互不重叠（纯串行）。
-* (b) 三个线程同时开始同时结束（多核真并行）。
-* (c) 三个线程被切成长短不一的碎块，任意交错（抢占式调度的常态）。
-
-### 2.4 由此得出的设计原则
-
-* **Independent threads**（不碰共享数据）：怎么交错都对，结果可复现。
-* **Cooperating threads**（碰共享数据）：结果取决于交错顺序，可能对可能错。
-
-所以写出正确并发程序的唯一出路是 **correctness by design**：从设计上保证**任意**交错下都对，而不是祈祷 scheduler 赏脸。测试在这里基本失效：跑一万次都对，第一万零一次换个交错就崩。
-
-***
-
-## 3. Race Condition
-
-核心问题：共享数据 + 任意交错，具体会错成什么样？
-
-### 3.1 先看不竞争的情况
-
-初始 `x = 0, y = 0`。
-
-```
-Thread A:  x = 1;
-Thread B:  y = 2;
+```text
+lock(m)
+    search and update the shared tree
+unlock(m)
 ```
 
-问：两个线程都跑完后，x 是几？
+![Locked tree operations](../assets/lec04/page15.png)
 
-一定是 1。A 写 x，B 写 y，各写各的、互不读对方的东西，谁先谁后都无所谓。**没有共享，就没有竞争。**
+**Acquire（获取）必须保证：竞争同一把空闲锁时，不能有两个线程都成功成为持有者。**
 
-### 3.2 再看竞争的情况
+不能自己用“先看 locked 是否为 0，再把它设为 1”这两步普通操作代替锁：A、B 可能同时看见 0，然后都认为自己拿到了锁。Mutex 内部必须用能够正确处理竞争的机制；本讲先使用这个保证，后续再研究实现。
 
-初始 `x = 0, y = 0`。
+- `lock` 成功返回：当前线程持有锁，才能继续访问临界区。
+- 锁已被占用：等待取得锁，不能跳过等待直接进入。
+- `unlock`：持有者释放锁，使其他线程有机会取得它。
 
+所有参与者必须使用保护这个结构的**同一个** lock。若 reader 可能与 writer 冲突，读取也需要遵守适当同步协议。各线程各拿一把独立的锁不构成互斥。
+
+同一把锁允许两种合法插入顺序：
+
+```text
+Insert(3), then Insert(4)       Insert(4), then Insert(3)
+          6                              6
+         /                              /
+        3                              4
+         \                            /
+          4                          3
 ```
-Thread A:  x = y + 1;
-Thread B:  y = 2;      ← 记作 B1
-           y = y * 2;  ← 记作 B2
-```
 
-问：x 可能是几？把 A "读 y" 这个动作能发生的所有时机列出来：
+- 3 先进入：它成为 6 的左孩子；4 随后重新搜索，成为 3 的右孩子。
+- 4 先进入：它成为 6 的左孩子；3 随后重新搜索，成为 4 的左孩子。
+- 两棵树形状不同，但都保留 3 和 4，也都满足 BST ordering。**正确性要求相同，不等于最终形状必须唯一。**
+- `Get(6)` 等读取若与修改并发，也要遵守同一同步规则，避免读到中间状态。
 
-| A 读 y 的时机 | 此刻 y 的值 | x 的结果 |
-|---|---|---|
-| B 还没动手 | 0 | **1** |
-| B 做完 B1、还没做 B2 | 2 | **3** |
-| B 全部做完 | 4 | **5** |
+> 💡 **拿着锁，不等于一直占着 CPU。** A 可能拿锁后被 OS 暂停；此时 B 即使获得 CPU，也不能通过这把锁进入临界区。等 A 恢复并解锁，B 才有机会进入。锁保护的是进入资格，不是连续运行时间。
 
-所以 x ∈ {1, 3, 5}，跑之前无法预知。这就是 **race condition**：Thread A races against Thread B，结果取决于谁跑赢。
+**运行示例：两个线程共同累加**
 
-再补两个推论：
-
-* B2 `y = y * 2` 自己也是"读 y、乘 2、写 y"三步，交错不仅能发生在两行代码之间，还能发生在一行代码内部。
-* **形成 race condition 的两个必要条件**：至少两个执行流碰同一份状态；其中至少一个在写。3.1 各写各的变量，两个条件都不满足，所以安全。
-
-### 3.3 一个更真实的破坏现场
-
-![Shared tree-based set data structure](../assets/lec04/page12.png)
-
-这是一棵 tree-based set：任何节点的左子节点比它小，右子节点比它大。现在 Thread A 调 `Insert(3)`，Thread B 同时调 `Insert(4)`。
-
-慢动作还原事故：
-
-1. A 从根往下找，发现 3 应该挂在 node 6 的 left child，**记住这个位置**，准备写入。
-2. 就在此刻 A 被切走。B 也从根往下找，发现 4 也应该挂在 node 6 的 left child，也记住了这个位置。
-3. A 切回来，把 3 挂上去：`node6.left = 3`。A 完工。
-4. B 接着执行，把 4 挂到它记住的位置：`node6.left = 4`，**直接把 3 覆盖掉**。
-
-结果：树里只有 4，3 凭空消失。最糟糕的是，同样的代码换个运行时机可能又对，bug 时隐时现。
-
-***
-
-## 4. Lock
-
-核心问题：怎么保证"改共享数据的那几步"不会被别人插进来？
-
-### 4.1 四个术语，一条因果链
-
-| 术语 | 定义 | 在链条中的位置 |
-|---|---|---|
-| **Synchronization** | coordination among threads, usually regarding shared data | 总称：线程间的协调 |
-| **Mutual Exclusion** | ensuring only one thread does a particular thing at a time | synchronization 的一种：互斥 |
-| **Critical Section** | code exactly one thread can execute at once | 互斥要保护的那段代码 |
-| **Lock** | an object only one thread can hold at a time | 实现互斥的工具 |
-
-### 4.2 锁的生活模型：单人间卫生间的钥匙
-
-整层楼只有一间单人卫生间，门口挂一把钥匙：
-
-* 想进去，先拿钥匙（`acquire`）。钥匙在，拿走、进门、反锁；钥匙不在，就**站在门口等**，里面的人不出来就一直等。
-* 出来把钥匙挂回去（`release`）。只有拿着钥匙的人才有资格还。
-
-对应到代码：
+`demos/lec04/mutex_counter.c` 创建两个 workers，各执行 100000 次：
 
 ```c
-lock.acquire();      // 拿钥匙：拿不到就阻塞在这行
-Insert(3);           // critical section：此刻全世界只有我碰这棵树
-lock.release();      // 还钥匙
+pthread_mutex_lock(&mutex);
+++counter;
+pthread_mutex_unlock(&mutex);
 ```
 
-### 4.3 锁的两个硬性规定
+Main 在 join 两个 workers 后读取结果。Mutex 负责 worker 之间的更新安全，join 负责 main 的读取发生在工作完成之后，两个机制解决不同问题。
 
-* `acquire` 内部"看锁是否空闲 + 占住它"必须是 **atomic（原子）** 的：这两步合起来不可被打断。否则两个线程会同时看到"空闲"、同时认为自己拿到了钥匙，锁就形同虚设。原子性怎么实现，这讲先当黑盒，Synchronization 章节专门讲。
-* `release` 只能由当前持有锁的线程调用。
+```sh
+cc -std=c11 -Wall -Wextra -pthread demos/lec04/mutex_counter.c -o /tmp/os-mutex-review
+/tmp/os-mutex-review
+```
 
-### 4.4 加锁之后，树的例子变成什么样
+实际运行输出：
 
-![Tree operations protected by a lock](../assets/lec04/page15.png)
+```text
+counter = 200000 (expected 200000)
+```
 
-A 的 `Insert(3)`、B 的 `Insert(4)`、甚至 B 的 `Get(6)` 都包上 `acquire → 操作 → release`。现在的执行序列是：
+正确性的理由是所有 counter 更新都由同一 mutex 保护，并且最终读取在全部 join 后。结果恰好正确的一次实验本身不是证明。
 
-1. A 先拿到锁，完整地挂好 3，放锁。
-2. B 拿到锁，重新从根找位置（此时 3 已经在树上），挂好 4，放锁。
+Mutex 的使用顺序：
 
-为什么连只读的 `Get(6)` 也要加锁？因为 B 读树的时候 A 可能正在改指针，顺着改到一半的指针走下去，读到的就是坏结构。
+1. **Initialize**：静态对象可用 `PTHREAD_MUTEX_INITIALIZER`，或调用 `pthread_mutex_init`。
+2. **Lock → access → unlock**：所有冲突访问遵守同一锁协议，由 owner 解锁。
+3. **Destroy**：确定没有线程再使用后，调用 `pthread_mutex_destroy`。
 
-### 4.5 锁保证什么、不保证什么
-
-这是最容易误会的地方，必须分开：
-
-* **保证**：3 和 4 最终都在树上。丢失节点这种错误被消灭。
-* **不保证**：谁先插入。树可能是 3 在上 4 在下，也可能反过来，形状依然 non-deterministic。
-
-后者**不是 bug**：两种形状都是合法结果。锁的职责是消灭"错误"，不是消灭"不确定"。把这两件事分清，这讲前半就算懂了。
-
-> 💡 **为什么 pthread_mutex 的 API 全是指针？**
->
-> ```c
-> int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
-> int pthread_mutex_lock(pthread_mutex_t *mutex);
-> int pthread_mutex_unlock(pthread_mutex_t *mutex);
-> ```
->
-> * `init` 要把初始化好的锁**交还**给调用者。C 没有多返回值，int 已经用来报告成败，锁本体只能靠指针带出来。
-> * `lock` / `unlock` 要**修改**锁的内部状态（locked 标志位），而锁是所有线程共享的同一个对象。如果传值，函数改的是一份拷贝，原件纹丝不动，锁永远锁不上。
-
-***
-
-## 5. 进程管理总览
-
-核心问题：进程怎么生、怎么死、谁在管谁？
-
-先接受一个世界观：
-
-* **Everything outside of the kernel is running in a process**。shell、`ls`、浏览器，全是进程。
-* 于是"谁创建进程"的答案只能是：**进程创建进程**（processes are created and managed by processes）。
-* 内核只亲手拉起第一个进程，之后整棵进程树都是进程生进程。
-
-管理进程的 API 有六个，先看全景：
-
-![Process management API and their thread counterparts](../assets/lec04/page19.png)
-
-| Process API | 作用 | 类比线程世界 |
-|---|---|---|
-| `exit` | terminate a process | `pthread_exit` |
-| `fork` | copy the current process | `pthread_create` |
-| `wait` | wait for a process to finish | `pthread_join` |
-| `exec` | change the program being run by the current process | 无对应 |
-| `kill` | send a signal to another process | 无对应 |
-| `sigaction` | set handlers for signals | 无对应 |
-
-* 前三个（`exit` / `fork` / `wait`）：创建、退场、收尸，线程世界里有一一对应的 API。
-* 后三个（`exec` / `kill` / `sigaction`）：进程特有的新概念。
-
-线程编程里常见的 **fork-join pattern**（main 分出一批子线程去干活，再 join 收结果），在进程世界就对应 `fork` + `wait` 的组合，§11 会看到它的完整形态。
-
-下面逐个攻破，每个都配能跑的真代码。
-
-***
-
-## 6. exit
-
-核心问题：进程怎么"正常死亡"？一定是程序自己写代码杀的吗？
+三个 API 的形式是：
 
 ```c
-#include <stdlib.h>
-#include <stdio.h>
-#include <unistd.h>
-
-int main(int argc, char *argv[]) {
-  pid_t pid = getpid();   /* get current process' PID */
-  printf("My pid: %d\n", pid);
-  exit(0);
-}
+int pthread_mutex_init(pthread_mutex_t *mutex,
+                       const pthread_mutexattr_t *attr);
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
 ```
 
-两个新知识点：
+- `init(&mutex, NULL)` 初始化已经提供存储位置的 mutex，NULL 表示默认属性；它不是返回一把锁。
+- 三者的 int 返回值表示成功或错误，**0 表示成功**。
+- Lock / unlock 都传 `&mutex`，因为它们要操作同一个锁对象的状态。
+- 不是所有指针都代表输出参数。这里的方向取决于 API 的用途，不能只看见 `*` 就认定“这是输出”。
 
-* 每个进程有唯一编号 **pid**（process id），`getpid()` 查自己的。
-* `exit(0)` 立即终止进程，0 表示"正常结束"。`exit` 和 `return` 的区别：`exit` 杀掉整个进程、抛弃一切未完成的事；`return` 只是结束当前函数。只有在 `main` 里两者效果才一样。
+**为什么 lock / unlock 不能只收到 mutex 的一份副本？**
 
-> 💡 **main 里不写 exit 会怎样？** 什么坏事都不会发生，这是本讲第一个反直觉点。程序真正的入口不是 `main`，而是 OS library（C 运行时库）里的一段启动代码：它先做初始化，再去调 `main`，`main` 一返回，**它替程序调 `exit()`**。所以 `exit` 永远会被执行到，写不写都一样。这也说明 `main` 并不是程序的第一行代码，它之前和之后都有 library 的代码在跑。
+1. A 获取锁后，必须让 B 也能观察到“这把锁已被持有”的状态。
+2. 若只修改各自副本，A 只把自己的副本标为忙，B 的副本仍是空闲；两边可能同时进入。
+3. 传同一个 mutex 的地址，才能操作同一个同步对象。实际 mutex 的内部结构不应被应用自行读写或复制。
 
-***
+完整 counter 示例检查每一次 pthread 调用的返回值。
 
-## 7. fork
+`pthread_mutex_lock(&mutex)` 传地址，因为函数要操作同一个 mutex 对象。复制 mutex 到每个 thread 或在使用中随意复制其内部状态都不是正确同步方式。
 
-核心问题：一个正在运行的进程，怎么凭空多出一个？
+## 2. 进程 API {#_2-process-lifecycle-·-创建、替换、回收}
 
-### 7.1 fork 做什么
+**核心问题：Shell 如何运行新程序，同时保留自己并取得结果？**
 
-`pid_t fork()`：把当前进程**整个复制一份**，造出 child process。复制得极其彻底：
+![Process and thread lifecycle APIs](../assets/lec04/page19.png)
 
-* 整个 address space：code、data、heap、stack 全拷贝
-* file descriptors 等进程资源
-* 当前所有变量的值
-
-不复制的只有两样：
-
-* **pid**：child 有自己的新编号
-* **线程数量**：child 里**只有调用 fork 的那一个线程**（哪怕 parent 有一百个线程）
-
-从 fork 返回那一刻起，父子是两个独立进程：各改各的内存，互不影响。
-
-### 7.2 调用一次，返回两次
-
-普通函数调用一次返回一次。fork **调用一次、返回两次**：在 parent 里返回一次，在 child 里也返回一次，而且返回值不一样：
-
-| 返回值 | 你在哪里 | 含义 |
+| Operation | Process API | Thread-related comparison |
 |---|---|---|
-| `> 0` | parent | 这个数字就是 child 的 pid |
-| `= 0` | child | 新出生的那个进程 |
-| `< 0` | parent | fork 失败 |
+| Create | `fork` | `pthread_create` starts a function in shared address space |
+| Finish | `exit` / `_exit` | `pthread_exit` terminates calling thread |
+| Wait for completion | `wait` / `waitpid` | `pthread_join` waits for a joinable thread |
+| Replace program | `exec` family | 没有等价的“只替换某线程地址空间” |
+| Signal handling | `kill`, `sigaction` | 也存在 thread-directed signal APIs，不能简单视为完全无对应 |
 
-为什么要有这张"身份牌"？
+这些是帮助理解的对照，不是逐项完全等价。Process 有独立地址环境；threads 在所属 process 内共享资源。
 
-* 父子执行的是**同一份代码**，代码必须有个办法知道"此刻是 parent 还是 child"，才能分流干不同的事。返回值就是唯一的区分手段。
-* parent 拿到 child 的 pid，是因为进程是层级管理的：parent 凭 pid 才能 wait、kill 自己的 child；child 不参与管理 parent。
+### fork：创建进程 {#fork-·-创建新的执行分支}
 
-### 7.3 用图看懂 fork 的瞬间
+**核心问题：调用后谁从哪一行继续，哪份数据被复制？**
 
+先记住这一件事：**`fork()` 成功后，多出一个子进程。父子从同一个位置往下执行，但各自拥有一份普通变量。**
+
+原来的进程叫 **parent process（父进程）**，新建的叫 **child process（子进程）**。下面只讨论父进程原本只有一个线程的情况。
+
+**① 调用前：只有一个进程**
+
+```text
+Parent (PID 100)
+    x = 10
+    执行到 fork()
 ```
-fork 之前：               fork 之后：
-┌─────────────┐          ┌─────────────┐   ┌─────────────┐
-│ pid = 13861 │          │ pid = 13861 │   │ pid = 13865 │
-│ i = 0       │   fork   │ i = 0       │   │ i = 0       │
-│             │ ───────► │ cpid = 13865│   │ cpid = 0    │
-└─────────────┘          └─────────────┘   └─────────────┘
-                            parent            child
-                          两个进程都从 fork 的下一行继续执行
-```
 
-### 7.4 代码与真实运行
+PID 是进程的编号。这里的 100 和后面的 101 都是便于推演的假设值。
+
+**② 调用成功后：两份代码继续执行，两份变量分别变化**
+
+下面摘出示例中的分支逻辑，省略输出和错误报告：
 
 ```c
-pid_t cpid, mypid;
-pid_t pid = getpid();
-printf("Parent pid: %d\n", pid);
-cpid = fork();
-if (cpid > 0) {              /* parent process */
-  mypid = getpid();
-  printf("[%d] parent of [%d]\n", mypid, cpid);
-} else if (cpid == 0) {      /* child process */
-  mypid = getpid();
-  printf("[%d] child\n", mypid);
+int x = 10;
+pid_t child = fork();
+
+if (child < 0) {
+    return 1;       // 创建失败，只有原来的进程
+} else if (child == 0) {
+    ++x;            // 子进程把自己的 x 改成 11
 } else {
-  perror("Fork failed");
+    // 父进程的 x 仍然是 10
 }
 ```
 
-本机实测（`demos/lec04/fork1.c`）：
-
+```text
+                          fork()
+                  ↙                  ↘
+          Parent (PID 100)        Child (PID 101)
+          child = 101             child = 0
+          x = 10                  x = 10 → 11
 ```
-Parent pid: 13861
-[13861] parent of [13865]
-Parent pid: 13861
-[13865] child
-```
 
-逐行对号入座：
+**③ 为什么同一段 if，父子走不同分支？**
 
-1. 进程 13861 打印 "Parent pid"，然后调 `fork()`。
-2. fork 之后世界上有两个进程：13861（parent）和 13865（child），都从 fork 的下一行继续跑。
-3. parent 里 `cpid = 13865 > 0`，进 if 分支，打印 "parent of [13865]"。
-4. child 里 `cpid = 0`，进 else if 分支，打印 "child"。
+1. Parent 收到的 fork 返回值是 **101**，即新 child 的 PID，所以走 `else`。
+2. Child 收到的 fork 返回值是 **0**，所以走 `child == 0`。
+3. Child 执行 `++x`，改的是自己的副本；parent 的 x 没被修改。
+4. 两者都从 fork 的返回位置继续。Child 不会重新执行前面的 `int x = 10`，也不会从 main 开头再跑一遍。
 
-> 💡 **为什么 "Parent pid" 出现了两次？** 这是"fork 复制一切"最生动的证据。`printf` 的内容先存在内存缓冲区里，fork 时这个缓冲区**连同没来得及显示的文字**一起被复制给了 child，child 退出时把自己那份缓冲也倒了出来，于是同一句话出现两遍。直接在终端跑通常只看到一次（终端是行缓冲，遇到换行立即显示），重定向到管道或文件才会看到这种重复。
+> 💡 `child == 0` 表示“当前正在子进程里”，不是说子进程的 PID 是 0。调用 `getpid()` 查询它的真实 PID，才会得到这里假设的 101。
 
-***
+**④ 三个容易混淆的值：pid、cpid、mypid**
 
-## 8. fork_race.c
+![Fork branches and process IDs](../assets/lec04/page25.png)
 
-核心问题：两个进程同时改"同一个变量"，算 race condition 吗？
+这段代码最容易混淆的是：**只写了一份源文件，fork 后却有两个执行者各自读同一段 if。** 把关键语句摘出来：
 
 ```c
-int i;
+pid_t pid = getpid();
 pid_t cpid = fork();
 if (cpid > 0) {
-  for (i = 0; i < 10; i++)  { printf("Parent: %d\n", i); /* sleep(1); */ }
+    pid_t mypid = getpid();  // parent 重新查询自己
+    // 打印 mypid 和 cpid
 } else if (cpid == 0) {
-  for (i = 0; i > -10; i--) { printf("Child: %d\n", i);  /* sleep(1); */ }
+    pid_t mypid = getpid();  // child 重新查询自己
+    // 打印 mypid
+} else {
+    // fork 失败，只有原进程处理错误
 }
 ```
 
-### 8.1 先回答：这不是 race condition
+- Fork 之前，只有一个执行者，已经把自己的 PID 存进 pid。
+- Fork 成功后，两个执行者都要完成 `cpid = fork()`，但拿到不同返回值。
+- 接下来不是“先执行 if，再执行 else if”，而是父子**各自在自己的执行流里判断条件**，分别选择一个分支。
+- 因此 parent 打印的 cpid 与 child 调用 getpid 得到的值相同：它们说的是同一个 child。
 
-问：父子都在改 `i`、都在打印，竞争吗？**不竞争**。
+这里先用 `pid = getpid()` 保存原进程编号，再调用 fork，最后父子各调用一次 getpid：
 
-* 父子是两个进程，各有独立的 address space。
-* fork 时 `i` 被复制成**两份**，parent 改自己那份，child 改自己那份。
-* 看起来像"同一个变量"，实际上是住在两套房子里的两个变量。
+| 变量怎样赋值 | Parent 中的值 | Child 中的值 | 原因 |
+|---|---|---|---|
+| Fork 前 `pid = getpid()` | 100 | 100 | Child 复制了已经保存的数值 |
+| `cpid = fork()` | 101 | 0 | Fork 向父子返回不同结果 |
+| Fork 后 `mypid = getpid()` | 100 | 101 | 重新查询各自当前的身份 |
 
-反过来说，如果这是同进程内的两个线程共享全局变量 `i`，那就是真 race：读、改、写三步交错，结果出错，必须加锁。
+**变量不会自动追踪身份变化。** `pid` 只是存着 100 的一块内存；只有再次调用 getpid，才会查到当前进程的编号。
 
-### 8.2 输出里什么确定、什么不确定
+**⑤ 两个循环：输出可以交错，计数器并不共享**
 
-* **确定**：parent 一定按序打印 0 到 9；child 一定按序打印 0 到 -9。单个进程内代码顺序执行，不会自己打乱自己。
-* **不确定**：两组行**彼此之间**谁先谁后，由 scheduler 决定，每次运行都可能不同。
+![Two independent loops after fork](../assets/lec04/page28.png)
 
-### 8.3 真实运行：缓冲会把交错藏起来
-
-本机实测（`demos/lec04/fork_race.c`，每行后 `sleep(1)`）跑了两次。
-
-第一次（默认设置）：child 的十行全部扎堆出现，然后 parent 的十行扎堆出现，看起来毫无交错。原因还是缓冲区：输出攒在各自进程的缓冲里，退出时才一次性倒出来。
-
-第二次用 `stdbuf -oL` 关掉缓冲，交错立刻现形：
-
-```
-Parent: 0
-Child: 0
-Child: -1
-Parent: 1
-Child: -2
-Parent: 2
-...
-```
-
-`sleep(1)` 的作用是放大交错：两个进程都跑不快，scheduler 频繁在它们之间切换，一行 parent 一行 child 就清晰可见。它只改变观察到的顺序，不改变各自序列的内容。
-
-***
-
-## 9. exec
-
-核心问题：fork 出来的 child 跑的还是同一份代码，怎么让它去跑**别的程序**？
-
-### 9.1 exec 做什么：夺舍
-
-```c
-char *args[] = {"ls", "-l", NULL};
-execv("/bin/ls", args);
-/* execv doesn't return when it works.
-   So, if we got here, it failed! */
-perror("execv");
-exit(1);
-```
-
-`execv` 把当前进程的 address space **整个扔掉**：code、data、heap、stack 全部清空，装入新程序，从新程序的入口开始跑。像夺舍：身体（pid）不变，灵魂（程序）整个换掉。
-
-```
-exec 之前：pid 13873 这个壳子里装的是原来的代码
-exec 之后：pid 13873 这个壳子里装的是 /bin/ls，原来的代码一行都不剩
-```
-
-### 9.2 三条规则
-
-1. **exec 成功时永不返回**。旧代码已经不存在，没有"回去"一说。
-2. 所以 `execv` 的下一行**只在失败时能执行到**，固定写法就是紧跟 `perror` + `exit(1)`。
-3. 整个进程唯一不变的是 **pid**。parent 凭这个 pid 照样 wait、管理它，哪怕里面的程序已经面目全非。
-
-`args` 数组以 `NULL` 结尾（exec 靠它判断参数结束），约定 `args[0]` 是程序名。exec 有一族变体（`execl` / `execvp` 等），区别只在参数写法和是否搜索 PATH。
-
-> 💡 **exit(100) 去哪了？** 假设把失败路径写成 `exit(100)`，parent 拿到的退出状态会是 100 吗？实测是 **0**。原因：`execv` 成功了，`exit(100)` 那一行已经随旧地址空间一起被覆盖，永远不会执行。child 的退出状态由新程序决定：`ls` 正常结束，返回 0。反过来，只有 exec **失败**时，那个 `exit(100)` 才有机会跑出来。
-
-***
-
-## 10. wait
-
-核心问题：parent 怎么知道 child 干完了、干得好不好？
-
-```c
-int status;
-pid_t tcpid;
-...
-tcpid = wait(&status);
-printf("[%d] bye %d(%d)\n", mypid, tcpid, status);
-```
-
-`wait(&status)` 让 parent **阻塞**（挂起不动），直到自己的某个 child 结束。醒来后拿到两样东西：
-
-* 返回值 `tcpid`：刚结束的那个 child 的 pid（对应 join 收卷时知道收的是谁的卷）。
-* `status`：child 的退出状态，编码在一个整数里（实际代码用 `WIFEXITED` / `WEXITSTATUS` 等宏解码，知道有这回事即可）。
-
-两个补充：
-
-* 为什么只能拿回一个整数？进程一退出，它的 address space 就消失了，不存在"返回一个指针或结构体"的通道，一个整数就是 parent 能拿到的全部死因报告。
-* 语义上 `wait` 就是进程版的 `pthread_join`：阻塞、收尸、看死因。
-
-***
-
-## 11. Shell Pattern
-
-核心问题：在终端敲一条命令，操作系统层面到底发生了什么？
-
-答案就是三件套合体：**fork + exec + wait**。
-
-![The shell pattern: fork, then child execs while parent waits](../assets/lec04/page32.png)
-
-```c
-pid = fork();
-if (pid == 0) exec(...);   /* child：变身成目标程序 */
-else          wait(&stat); /* parent（shell 自己）：等命令结束 */
-```
-
-敲 `ls -l` 回车，逐步发生：
-
-1. shell `fork` 出一个自己的副本。此刻内存里有两个"shell"。
-2. child 走 if 分支，`exec` 成 `/bin/ls`：这个 shell 副本从此变成 ls 进程，开始列目录。
-3. parent（真正的 shell）走 else 分支，在 `wait` 上阻塞。所以命令运行期间看不到提示符。
-4. ls 打印完、退出，`wait` 醒来，shell 打印下一个提示符。
-
-命令末尾加 `&` 变后台运行，本质就是 shell 跳过第 3 步，不 wait。
-
-本机实测（`demos/lec04/fork2.c`，child exec 成 `ls -l`）：
-
-```
-[13872] parent of [13873]
-（child 已变身成 ls，输出当前目录的文件列表）
-[13872] bye 13873(0)
-```
-
-`bye` 后面的 13873 是 `wait` 返回的 child pid，`(0)` 是 status，`ls` 正常结束所以是 0。（真实运行时由于 printf 缓冲，这两行日志可能出现在 ls 列表之后，内容不变。）
-
-把镜头再拉远一层：
-
-* 内核启动时拉起 root process（pid 0 或 1）。
-* 它 fork 自己、exec 成各种系统进程，这些进程再生自己的 child。
-* 最终整台机器的所有进程构成**一棵进程树**，每个 parent 凭 pid 管理自己的子树。
-
-这就是 "processes manage processes" 的完整图景，也是 shell 里每个命令的身世。
-
-***
-
-## 12. Signal
-
-核心问题：进程在外面跑，别人（OS、其他进程、按键盘的用户）怎么隔空影响它？
-
-### 12.1 两个名词先摆正
-
-* **Signal** 是 OS 给进程发的一种**异步通知**：不管代码跑到哪，信号来了就先打断，转去执行这个信号对应的处理逻辑。它和代码的执行流无关，随时可能到来。
-* **`kill` 不是"杀死"，是"发信号"**。杀不杀得死，取决于发的是哪种信号、对方怎么处理。
-
-每个信号都有系统预装的 **default handler**。所以哪怕程序从没注册过任何 handler，按 Ctrl-C 照样能杀掉它：默认动作（终止进程）替它处理了。
-
-### 12.2 自定义反应：sigaction
-
-```c
-#include <stdlib.h>
-#include <stdio.h>
-#include <signal.h>
-
-void signal_callback_handler(int signum) {
-  printf("Caught signal!\n");
-  exit(1);
-}
-
-int main() {
-  struct sigaction sa;
-  sa.sa_flags = 0;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_handler = signal_callback_handler;   /* 指定回调函数 */
-  sigaction(SIGINT, &sa, NULL);              /* 完成注册：SIGINT → handler */
-
-  while (1) {}
-}
-```
-
-注册分两步：
-
-1. `sa.sa_handler = signal_callback_handler`：把回调函数的地址填进结构体。
-2. `sigaction(SIGINT, &sa, NULL)`：把"SIGINT 来了就调这个函数"的对应关系告诉内核。
-
-注册完程序进入死循环。
-
-### 12.3 真实运行：两组对照实验
-
-**实验一**（`demos/lec04/inf_loop.c`，注册了 handler）：给它发 SIGINT（等价于按 Ctrl-C）：
-
-```
-Caught signal!
-进程已退出，exit code = 1
-```
-
-进程没有被直接杀死，而是执行了注册的 handler：打印一句话，然后 handler 里主动 `exit(1)`，退出码正是 handler 里写的 1。**进程接管了对自己死因的处理权**。真实场景常用这个窗口做清理（存盘、关连接）再体面退出。
-
-**实验二**（没注册 handler 的普通死循环）：收到 SIGINT：
-
-```
-进程被默认动作杀死，exit code = 130
-```
-
-130 = 128 + 2，2 是 SIGINT 的编号。默认 handler 直接终止进程，没有任何告别机会。两组输出并排，"默认 handler"和"自定义 handler"的区别就再也不是抽象概念。
-
-### 12.4 常见信号与一条铁规
-
-| Signal | 触发方式 | 默认动作 |
-|---|---|---|
-| `SIGINT` | Ctrl-C | 终止进程 |
-| `SIGTERM` | shell 命令 `kill <pid>` 的默认信号 | 终止进程 |
-| `SIGSTOP` | Ctrl-Z | 暂停进程 |
-| `SIGKILL` | `kill -9 <pid>` | 强制终止 |
-
-铁规：**`SIGKILL` 和 `SIGSTOP` 不能用 `sigaction` 改**。为什么？
-
-* 设想在 handler 里也写一个死循环：信号来了进程不死，那就再也没有任何办法终止它。
-* 所以系统必须保留一条任何进程都无法屏蔽的最后手段，`kill -9` 是杀手锏就靠这条规矩。
-
-***
-
-## 13. Why fork + exec
-
-核心问题：线程创建一个 `pthread_create` 就完事，进程为什么要"先复制、再变身"两个调用？
-
-两个理由：
-
-1. **fork 不配 exec 也很好用**。想让父子跑同一份代码的不同分支（fork_race 就是），一个可执行文件就够，不用拆成两个程序。
-2. **两步之间可以插代码**（更重要的理由）。child 在 exec 之前有机会先执行一段代码、调整自身状态。后面 File I/O 章节会看到：shell 实现 `ls > out.txt` 重定向和管道，靠的就是 fork 之后、exec 之前先把 child 的 file descriptors 改掉。
-
-对比 Windows 的 `CreateProcess()`：创建和装载揉成一个调用，也能工作，但接口复杂得多（所有设置都得塞进一个几十参数的函数）。Unix 的取舍：**两个小工具自由组合，胜过一个大而全的调用**。
-
-***
-
-## 14. Threads vs Processes
-
-核心问题：两个任务要并发跑，开两个线程还是两个进程？
-
-| 维度 | Threads（同进程） | Processes（不同进程） |
-|---|---|---|
-| 通信 | 容易：共享内存直接读写（配好锁） | 麻烦：地址空间隔离，得走文件、pipe 等机制 |
-| 创建与切换成本 | 低：不用新建地址空间，切换只换寄存器现场 | 高：fork 要复制整个地址空间，切换要保存恢复更多状态 |
-| 故障隔离 | 差：一个线程崩溃，整个进程连同所有线程一起死 | 好：一个进程崩了只死自己，parent 还能从 wait 的 status 知道死因 |
-| 适用场景 | 同一个大任务内部的紧密协作 | 相互独立、需要互相防身的任务 |
-
-故障隔离那条值得展开：
-
-* 某线程算了一个 `1 / 0`，异常直接终结**整个进程**，同进程的其他线程全部陪葬。
-* 如果这两个任务分属两个进程，死的只有犯错的那一个，另一个毫发无损。
-
-一句话：**线程用"低成本协作"换"风险共担"，进程用"高成本通信"换"故障隔离"**。isolation 就是操作系统愿意容忍进程高成本的根本原因。
-
-***
-
-## 15. （可选）Goroutine
-
-进程和线程之外，还能不能有第三层并发抽象？Go 的答案是 **goroutine**：
-
-* 在代码和 OS threads 之间加了一个 **runtime layer**。
-* 成千上万个 goroutine 怎么映射到少数几个 OS 线程、什么时候切换，由 runtime 在用户态自己决定，OS 不参与。OS 眼里这个 Go 程序只有寥寥几个线程。
-* 取舍：用 **direct OS control** 换 **simplicity and scale**。切换更便宜，写并发程序的门槛更低。
-
-***
-
-## 16. 总结
-
-| 主题 | 一句话 |
+| Parent 的循环 | Child 的循环 |
 |---|---|
-| Non-determinism | scheduler 可在任意两条语句间切换线程，程序必须对任意调度正确，测试无法穷举 |
-| Race condition | 多个执行流碰同一份状态且至少一个在写，结果取决于交错顺序 |
-| Lock | acquire / release 两个原子操作包住 critical section；保证"操作不丢"，不保证顺序 |
-| `fork` | 复制整个进程；调用一次返回两次，parent 拿 child pid，child 拿 0 |
-| `exec` | 整个 address space 换成新程序，只保留 pid；成功不返回 |
-| `wait` | parent 阻塞回收 child，拿回 child pid 和一个整数 status |
-| `kill` / `sigaction` | 发信号 / 注册 handler；每个信号有默认动作，SIGKILL 和 SIGSTOP 不可改 |
-| Shell | 每条命令 = fork + exec + wait；所有进程构成一棵以 root process 为根的树 |
+| i 从 0 开始，每次加 1 | i 从 0 开始，每次减 1 |
+| 自己的输出依次是 0、1、…、9 | 自己的输出依次是 0、-1、…、-9 |
 
-课件结尾还有一条回收 lec02/lec03 的总结：system call interface 是用户程序和内核之间的 **"narrow waist"**（细腰），所有系统服务都从这少数几个入口走；而且进内核必须是**原子**的，"PC 跳转到内核代码"和"CPU 切到 kernel mode"两件事同时发生，不能分开，否则就会出现用户态执行内核代码的漏洞。
+- Parent 打印 2 时，child 可能还在打印 0，也可能已经打印到 -5。谁推进得更快由调度决定。
+- 两边都叫 i，但它们是两个进程中的不同对象。Child 的 `--i` 不会把 parent 的 i 减小。
+- 加 `sleep` 只是让某个进程暂时等待，不能保证父子严格轮流输出。
 
-***
+如果改成 threads，要重新看 i 在哪里：每个 worker 自己声明的局部 i 仍各有一份；共同修改一个全局 i，才是共享访问。
 
-## 17. Self-check
+::: info 实现补充：为什么复制进程不一定马上复制全部内存？
+**Copy-on-write（写时复制）** 可以先让父子共享受保护的物理页；一方要写入时，再分开需要修改的页。对普通私有变量而言，程序看到的效果仍是各有一份。
 
-1. 初始 `x = 0, y = 0`。Thread A 执行 `x = y + 1;`，Thread B 执行 `y = 2; y = y * 2;`。x 可能取哪些值？把每种值对应的交错顺序写出来。改成 A 执行 `x = 1;`、B 执行 `y = 2;` 呢？
-2. Synchronization、mutual exclusion、critical section、lock 四个概念的关系是什么？为什么 `acquire` 内部"检查 + 占用"必须是原子的？
-3. 并发向一棵树 insert 两个节点，不加锁最坏的后果是什么？加了锁之后，结果里还有什么是 non-deterministic 的？这算 bug 吗？
-4. `fork` 的返回值有哪三种情况，分别意味着什么？fork_race.c 里父子都在改 `i`，为什么不是 race condition？什么情况下它就变成 race condition 了？
-5. `execv` 成功和失败时，紧随其后的那行代码分别会不会执行？demo 里 child 写了 `exit(100)`，parent 拿到的 status 为什么是 0？
-6. 在 shell 里敲 `ls -l` 回车，把 shell 内部发生的系统调用按顺序写出来。命令末尾加 `&`，对应哪一步的变化？
-7. 进程收到一个没有注册 handler 的信号会怎样？为什么系统不允许用 `sigaction` 改掉 `SIGKILL` 和 `SIGSTOP`？
+打开的文件还有另一套共享规则：父子的文件描述符可能指向同一个已打开文件，因而共享读取位置。不要把“变量独立”理解成“所有资源都毫无关联”。
+:::
 
-<br />
+**Fork 前的输出为什么有时重复？**
 
-**A1.** x ∈ {1, 3, 5}。A 在 B 开始前读 y（y = 0）得 1；B 执行完 `y = 2` 后、`y = y * 2` 前 A 读 y（y = 2）得 3；B 全部执行完（y = 4）A 再读得 5。改成各写各的变量后 x 恒为 1：没有共享状态就没有竞争。
+**核心问题：为什么 fork 之前 printf 的一段文字有时出现两次？**
 
-**A2.** Synchronization 是线程间协调的总称；mutual exclusion 是它的一种，要求同一时刻只有一个线程做某件事；被互斥保护的代码段叫 critical section；lock 是实现互斥的工具。如果"检查锁空闲"和"标记占用"之间能被打断，两个线程会同时看到空闲、同时占锁，critical section 里就会挤进两个线程，锁失去意义。
+先区分两个动作：**程序执行了 printf**，以及**字符已经真正交给输出目标**。它们不一定同时完成。
 
-**A3.** 最坏后果：两个线程都定位到同一个插入点，先后写入时后者覆盖前者，一个节点凭空丢失。加锁后两个节点一定都在树上，但谁先插入、树的最终形状仍然 non-deterministic。这不算 bug：两种形状都是合法结果，lock 的职责是消灭"丢失"这种错误，不是固定顺序。
+```c
+printf("before fork\n");
+pid_t child = fork();
+```
 
-**A4.** `> 0`：在 parent 中，值是 child 的 pid；`= 0`：在 child 中；`< 0`：失败，仍在原进程。fork_race 里父子是两个进程，各有独立 address space，`i` 被复制成两份，各改各的，不构成共享状态，所以不是 race condition。如果改成同进程内两个线程共享全局变量 `i`，读、改、写交错就会出错，必须用 lock 保护。
+假设输出被重定向，fork 时这行文字还在 stdio 的内存缓冲区中：
 
-**A5.** `execv` 成功时整个 address space 被新程序替换，旧代码不复存在，后面那行不会执行；失败时才会执行到（所以固定写 `perror` + `exit(1)`）。demo 里 `execv("/bin/ls", ...)` 成功了，`exit(100)` 那行已随旧程序一起被覆盖，child 的退出状态由 `ls` 决定，`ls` 正常结束返回 0。
+1. Fork 前，只有一个进程执行了 printf，把文字暂存在自己的内存里。
+2. Fork 复制进程内存，child 也拿到了一份尚未刷出的文字。
+3. Parent 正常退出时刷新自己的缓冲，输出一次。
+4. Child 正常退出时刷新自己的副本，再输出一次。
 
-**A6.** shell 先 `fork()` 复制自己；child 走 `pid == 0` 分支调 `exec` 变身成 `ls`；parent（shell 本体）调 `wait(&status)` 阻塞，直到 `ls` 结束才回到提示符。加 `&` 对应 parent 不立即 wait，直接回到提示符，child 在后台跑。
+**因此，看到两份文字不表示 fork 前的代码执行了两次；可能只是同一份未刷出的内容被复制了。**
 
-**A7.** 执行系统为该信号定义的 default handler，对 SIGINT、SIGTERM 这类信号默认动作是终止进程。不允许改 SIGKILL 和 SIGSTOP 是为了保留最后的管理手段：如果 handler 可以任意改写，进程在 handler 里写个死循环就能让任何信号都杀不死自己，失控进程将无法被终止或暂停。
+在终端上，stdout 通常是行缓冲，换行可能已经触发刷新，于是不会重复。若要消除这类重复，可在 fork 前执行 `fflush(stdout)` 并检查结果：先交出缓冲内容，再复制进程。
 
-***
+同样，看到 parent 的多行输出聚在一起，也不能断言它连续独占 CPU。两边可能都执行过，只是各自攒着文字，稍后才成批交出。`stdbuf -oL` 指定行缓冲，并非完全关闭缓冲；它也不是所有平台都有的命令。
 
-*Images extracted from the official Lecture 4 slides. Notes rewritten in my own words for review; errors are mine. Demo code in `demos/lec04/` was compiled and run locally; outputs are real.*
+### exec：替换程序 {#exec-·-替换当前程序}
+
+**核心问题：为什么 child 调用 exec 成功后，不会再回到原来的下一行？**
+
+```c
+char *args[] = {"echo", "child: new program", NULL};
+execv("/bin/echo", args);
+perror("execv");  // reached only on failure
+_exit(127);
+```
+
+**把 process 理解为“这一次运行的身份”，把 program 理解为“它正在执行的代码”。Exec 保留前者，换掉后者。**
+
+```text
+Exec 前：Child，PID 101，执行原来的 C 程序
+                         ↓ execv 成功
+Exec 后：仍是 PID 101，开始执行 echo 程序
+```
+
+- 原程序的代码、普通变量和调用栈被新程序替换。
+- 因为旧代码已经被替换，echo 结束后也不会回来执行 `perror`。
+- 只有 exec 失败，旧程序才保留下来，继续执行错误处理。
+
+| Outcome | Program image | Return / retained state |
+|---|---|---|
+| Success | 替换为新程序 | 不返回旧调用点；保留 PID、working directory、非 CLOEXEC file descriptors 等 |
+| Failure | 旧程序继续存在 | 返回 -1，检查错误并处理 |
+
+逐项读参数：
+
+- `"/bin/echo"`：要加载哪个可执行文件。
+- `args[0] = "echo"`：新程序收到的名称，放在它的 argv[0] 中。
+- `args[1] = "child: new program"`：传给 echo 的文字。
+- 最后的 `NULL`：参数数组到这里结束。
+
+`execv` 使用指定路径；`execvp` 可以按 PATH 查找程序。它们的共同点都是成功后不返回旧代码。
+
+![Parent waits while child executes ls](../assets/lec04/page31.png)
+
+先回答这个容易选错的问题：**child 中明明有 `exit(100)`，parent 为什么可能读到退出码 0？**
+
+不要把 exec 当成“调用 ls 函数，等它返回”：
+
+- 普通函数调用保留 caller，函数结束后还要返回 caller 的下一行。
+- Exec 成功会替换当前程序。旧 caller 的代码和调用栈已经不再是这次运行的程序，后面的 `exit(100)` 也不会作为后续步骤执行。
+- 新程序 ls 决定自己的退出状态。Ls 成功结束时为 0；exec 失败才会留在旧代码中处理错误。
+
+接着把父子两条执行流分开跟，不能从上到下当成单线程程序读。
+
+把 `/bin/ls -l` 的例子按执行者分开：
+
+1. Parent 进入 `wait(&status)`，等待 child 的终止信息；wait 的返回值是被回收 child 的 PID。
+2. Child 构造 `{"ls", "-l", NULL}`，其中 `-l` 是交给新程序的 argument。
+3. Exec 成功后，child 运行 ls；原代码后面即使有 `exit(100)`，也不会执行。
+4. Ls 正常成功退出时，其 exit status 为 0；parent 应解码 status，不能把 raw status 直接当退出码。
+5. Exec 失败时才返回旧代码。这条路径必须明确报错并退出，避免误走后续 parent / shell 逻辑。
+
+> 💡 若 `execv` 后写了 `_exit(100)`，它只会在失败路径执行。成功后 child 的退出结果由新程序决定，不能继续按旧程序的 100 推算。
+
+### exit 与 wait {#exit-wait-·-结束与回收}
+
+**核心问题：进程结束后，parent 怎样知道它是正常返回还是被信号终止？**
+
+| Operation | Scope | Cleanup |
+|---|---|---|
+| 普通函数 `return` | 当前函数 | 返回 caller，程序可以继续 |
+| 初始 `main` 的 `return` | 整个 process | 正常退出清理 |
+| `exit` | 整个 process，包含所有 threads | atexit handlers、stdio flushing 等 |
+| `_exit` | 整个 process | 跳过上述 user-space 清理，常用于 fork 后的失败路径 |
+
+**为什么 main 里只写 return，也能结束进程？**
+
+```text
+程序入口 → C 运行时准备环境 → 调用 main
+                               ↓ main 返回
+                         正常退出与清理
+```
+
+Main 是应用代码的主要入口，但不是启动时执行的第一条机器指令。初始 main 返回相当于以该返回值进行正常退出；普通辅助函数 return 只会回到它的调用者。
+
+被致命信号直接终止属于另一条路径，不保证执行正常退出清理。
+
+**Wait 是 parent 做的事，不是 child 退出前要调用的函数。**
+
+1. Parent 调用 `waitpid(child, &status, 0)`，指定要等哪个 child。
+2. Child 还没结束：parent 暂停等待，CPU 可以运行别的任务。
+3. Child 已经结束：parent 取得它的终止信息，回收 OS 为它保留的退出记录。
+4. Parent 从 waitpid 返回，继续执行后面的代码。
+
+Child 已结束、退出记录却还没被回收的阶段，称为 **zombie（僵尸进程）**。它不是继续运行的程序，而是等待 parent 收取的一份记录。
+
+**一个调用，两种结果：**
+
+| 位置 | 得到什么？ |
+|---|---|
+| `waitpid` 的返回值 | 成功时是被回收 child 的 PID；失败时是 -1 |
+| `status` 变量 | 终止方式及相关信息，通过 `&status` 写入 |
+
+`wait(&status)` 不指定一个具体 PID，而是等待符合条件的任意一个子进程。
+
+```c
+if (WIFEXITED(status)) {
+    printf("child exit = %d\n", WEXITSTATUS(status));
+} else if (WIFSIGNALED(status)) {
+    printf("child signal = %d\n", WTERMSIG(status));
+}
+```
+
+为什么要分两步读 status？因为 OS 需要区分“程序自己退出”和“被信号终止”：
+
+- Child 执行 `exit(7)`：先确认 `WIFEXITED(status)` 为真，再用 `WEXITSTATUS(status)` 得到 7。
+- Child 被终止信号结束：检查 `WIFSIGNALED(status)`，再用 `WTERMSIG(status)` 取得信号编号。
+
+**不要直接打印 status，就把它当成 child 的退出码。** 完整示例也处理了 waitpid 失败和等待被信号打断的情况。
+
+### Shell 执行命令 {#shell-·-串起完整流程}
+
+**核心问题：为什么 shell 执行外部命令后还能继续接收命令？**
+
+![Fork, exec, wait in a shell](../assets/lec04/page32.png)
+
+图中看起来有三个装着相似代码的框，但含义不同：
+
+1. 左边是 fork 之前的 shell。
+2. 向上、向下分叉后，分别是 child 和 parent；两边都有同样的分支代码，但判断结果不同。
+3. 上方 child 沿 exec 箭头变成右边的新程序；箭头不是再创建一个进程，所以此时仍是这对父子。
+4. 下方 parent 停在 wait；它没有变成 ls，命令结束后仍由它继续提供交互。
+
+**如果 shell 自己直接 exec 成 ls 会怎样？** 原 shell 会被替换。Ls 结束后，没有那份旧 shell 代码回来打印下一个提示符。这就是通常先 fork，让 child exec 的原因。
+
+```text
+Shell P                         Child C
+  fork ───────────────────────► returns 0
+  receives C's PID              exec external command
+  waitpid(C)                    command runs
+  blocked                       command exits
+  wait returns ◄─────────────── termination collected
+  next prompt
+```
+
+若 shell 自己直接成功 exec，它就被替换，无法按原代码继续显示提示符。因此先 fork，再让 child exec。
+
+后台命令让 shell 不在此处同步等待，但 shell 仍应在之后回收 child。内建命令也不一定采用这条路径：例如改变 shell 自己的 working directory，需要在 shell 的上下文完成。
+
+**为什么进程需要 fork 和 exec 两步，而线程用一次 create？**
+
+- 新线程仍在原进程里，可以直接指定已有代码中的 worker 函数作为入口。
+- Fork 创建一个仍执行原程序的 child；它可以直接做事，不一定调用 exec。
+- 若要运行另一程序，child 可以先准备环境，例如调整输出文件，再 exec。新程序继承准备好的相关环境。
+
+例如执行 `ls > result.txt`，shell 可以先让 child 把标准输出接到文件，再启动 ls。Ls 仍然向标准输出写，内容却进入文件。这里只理解两步之间为什么有用，文件描述符的细节留到 I/O 章节。
+
+**运行示例：把 fork、exec、wait 连起来**
+
+```sh
+cc -std=c11 -Wall -Wextra demos/lec04/process_review.c -o /tmp/os-process-review
+/tmp/os-process-review
+```
+
+实际输出：
+
+```text
+before fork: x=10
+child before exec: x=11
+child: new program
+parent after wait: x=10, child exit=0
+```
+
+这个示例通过代码保证输出顺序：fork 前先刷出提示；子进程换程序前也先刷出提示；父进程等子进程结束后才打印最后一行。其他没有这些安排的 fork 程序，输出顺序可能不同。
+
+## 3. 信号 {#_3-signals-·-通知、停止与终止}
+
+**核心问题：另一个进程或终端怎样请求目标进程停止、继续或处理事件？**
+
+假设一个程序一直循环，终端里按下 Ctrl-C 后它为什么会停？
+
+1. 终端向前台进程组发送 **SIGINT**，这是一种 signal（信号）。
+2. 若程序没有改变处理方式，系统按 SIGINT 的默认行为终止它。
+3. 若程序通过 `sigaction` 注册了处理函数，收到信号时就可以运行这个函数。它叫 **signal handler**。
+
+**注册不等于执行。** `sigaction` 是提前告诉系统“以后收到这种信号时怎么办”；真正收到信号后，handler 才有机会运行。
+
+`kill(pid, signal)` 也可以发送信号。名字虽然叫 kill，效果却取决于发的是什么信号，并不总是结束进程；发送者还需要具备相应权限。
+
+| Signal | 常见来源或用途 | 默认行为 |
+|---|---|---|
+| `SIGINT` | 终端 Ctrl-C，发给前台进程组 | 终止 |
+| `SIGTERM` | 常规终止请求，例如 kill 命令默认发送它 | 终止 |
+| `SIGTSTP` | 终端 Ctrl-Z，发给前台进程组 | 停止执行 |
+| `SIGSTOP` | 不能捕获的停止请求 | 停止执行 |
+| `SIGCONT` | 让已停止的进程继续 | 继续执行 |
+| `SIGKILL` | 不能捕获的强制终止请求 | 终止 |
+
+- **Ctrl-Z → SIGTSTP**；不要与 SIGSTOP 混淆。
+- **SIGKILL / SIGSTOP**：不能捕获、忽略或屏蔽。这样系统仍保留强制终止或停止目标的手段，不会被目标自定义的 handler 绕开。
+- **Default action**：由系统定义，可以是 terminate、stop、continue 或 ignore，不必执行用户 handler。
+
+Signal 可能 pending 或 blocked，发送成功不等于目标已经立即完成响应。它与 CPU hardware interrupt 的入口和用途也不同。
+
+### 注册 handler {#sigaction-·-先注册-再接收}
+
+**核心问题：系统怎样知道收到 SIGINT 后应该调用 on_int？**
+
+下面摘自可运行示例的 main：
+
+```c
+struct sigaction action = {0};
+action.sa_handler = on_int;
+if (sigemptyset(&action.sa_mask) == -1 ||
+    sigaction(SIGINT, &action, NULL) == -1) {
+    perror("sigaction");
+    return EXIT_FAILURE;
+}
+```
+
+| 代码 | 做了什么？ |
+|---|---|
+| `action = {0}` | 初始化配置结构，其中 sa_flags 为 0，使用这里的普通设置 |
+| `action.sa_handler = on_int` | 保存处理函数地址，暂时不调用它 |
+| `sigemptyset(&action.sa_mask)` | 把处理期间要额外屏蔽的信号集合设为空 |
+| `sigaction(SIGINT, &action, NULL)` | 为 SIGINT 安装这份设置；最后的 NULL 表示不取回旧设置 |
+| 返回值检查 | 如果配置失败，报错并结束，不能假定 handler 已装好 |
+
+普通设置下，处理 SIGINT 时通常会暂时屏蔽同一种信号，避免它立刻再次进入同一个 handler。`sa_mask` 为空表示不在此基础上额外屏蔽其他种类。
+
+> 💡 **Signal blocked 不是 thread blocked。** 前者表示暂不递送某种信号，线程仍可能继续执行；后者表示线程正在等条件，暂时不能被调度运行。等待递送的信号称为 pending。
+
+### 处理信号 {#handler-·-安全处理异步事件}
+
+**核心问题：为什么不能随意在 handler 里 printf？**
+
+1. Signal 可能在 library 更新内部状态的中途到达。
+2. Handler 再调用不安全的 library function，可能破坏状态或死锁。
+3. 因此本例使用 async-signal-safe 的 `write` 和 `_exit`，不用 `printf` 或普通 `exit`。
+
+```c
+static void on_int(int signo) {
+    (void)signo;
+    const char message[] = "caught SIGINT\n";
+    (void)write(STDOUT_FILENO, message, sizeof message - 1);
+    _exit(1);
+}
+```
+
+Handler 的参数 signo 是收到的信号编号；这里已经知道只处理 SIGINT，所以用 `(void)signo` 明确表示没有使用它。
+
+可运行代码 `demos/lec04/signal_review.c` 安装 handler 后打印 ready，再通过 `pause()` 等待信号，不用空循环一直消耗 CPU。
+
+```sh
+cc -std=c11 -Wall -Wextra demos/lec04/signal_review.c -o /tmp/os-signal-review
+/tmp/os-signal-review
+```
+
+在终端看到 ready 后按 Ctrl-C。实测发送 SIGINT 得到：
+
+```text
+ready
+caught SIGINT
+```
+
+这个例子的执行顺序是：
+
+1. 安装 handler，打印 `ready`，开始等待。
+2. 收到 SIGINT，执行 on_int，输出 `caught SIGINT`。
+3. Handler 调用 `_exit(1)`，所以实测退出码为 1。
+
+若没有安装 handler，而是按 SIGINT 的默认行为终止，parent 会读到“被信号终止”。这与程序主动执行 `exit(1)` 是两种不同的终止方式。
+
+把两种路径并排看：
+
+| 收到同一个 SIGINT | 谁决定接下来做什么？ | 结果怎样产生？ |
+|---|---|---|
+| 保持默认处理 | 系统采用 SIGINT 的默认动作 | 因信号终止，wait 状态记录信号原因 |
+| 安装本例 handler | 系统递送信号时转去执行 on_int | on_int 打印后主动 `_exit(1)`，wait 状态记录正常退出码 1 |
+
+所以本例“打印后退出”来自 handler 的代码，不是所有自定义 handler 都必须退出。如果 handler 返回，程序通常会恢复原来的执行；如果 handler 自己陷入循环，普通可捕获信号就未必能按预期结束它，这也是保留 SIGKILL 等强制手段的理由。
+
+## 4. 线程还是进程 {#_4-design-choices-·-线程还是进程}
+
+**核心问题：共享便利、故障隔离和实现成本怎样取舍？**
+
+| Property | Threads in one process | Separate processes |
+|---|---|---|
+| Memory | 同一 address space，直接共享方便 | 默认独立，合作需 IPC 或显式共享 |
+| Failure containment | 致命内存错误通常影响整个 process | 通常有较强的地址隔离 |
+| Cost | 通常较低，但依实现和工作量 | 地址空间管理可能增加成本，COW 可降低 fork 成本 |
+| Coordination | Shared state requires synchronization | 共享内存、文件等仍可能有 race |
+
+例如，编辑器要后台读取文件并更新界面：线程方便直接共享读到的数据，但要协调谁在什么时候修改它。
+
+如果两个任务需要更强的内存隔离，可以使用不同进程，再通过 pipe 等方式传递数据。代价是不能直接把另一个进程的普通变量当成自己的变量使用。
+
+线程正常返回，只表示这条工作结束；非法内存访问引发的严重错误则可能使整个进程终止。这两种情况要分开。
+
+**为什么 join 可以交回地址，wait 却交回退出状态？**
+
+1. Threads 共享地址空间，worker 可以交回一个仍存活对象的地址，让 main 继续访问。
+2. 普通父子进程拥有不同的私有地址空间。Child 的一个地址，并不让 parent 自动获得访问其数据的能力。
+3. Wait 取得的是 OS 保存的终止信息，不是 child 的任意一块内存。
+4. 进程当然可以传递复杂结果，但需要另用 pipe、socket、共享内存等通信方式。
+
+**可选：runtime-managed concurrency**
+
+Goroutine 是 Go 运行时管理的任务。在任务与 OS threads 之间，再加了一层调度：
+
+```text
+多个 goroutines → Go runtime 分配工作 → OS threads → CPU
+```
+
+运行时决定哪个 goroutine 使用哪条线程，OS 仍决定这些线程何时获得 CPU。它不是“所有任务必定只在一个 OS 线程里”，也不自动消除共享数据的同步需求。
+
+### 与内核的联系 {#与内核保护机制的联系}
+
+**核心问题：这些 API 与前两讲的 dual mode 有什么关系？**
+
+创建进程、替换映像、等待子进程等操作通过受控系统接口请求 kernel 服务。Kernel 负责实际建立和管理进程，不是 parent 直接修改内核数据结构。系统中的 parent-child 关系也不意味着 kernel 本身是一个普通的“根进程”。
+
+System call interface 像连接众多应用与内核实现的 narrow waist。硬件必须把权限变化与进入受信任位置作为安全的入口过程完成，不能让用户任意组合“先取得特权，再跳到自己选的代码”。完成服务后，可以返回原 thread，也可能调度其他 ready 工作。
+
+## Self-check
+
+1. 教学模型中 `x=y+1` 与 `y=2; y=y*2` 为什么得到 1、3、5？能否直接推广到无同步的 C？
+2. 只保护 BST 最后一次 pointer assignment 为什么可能不够？
+3. 持锁线程被 timer 抢占，是否说明 mutex 失效？
+4. Fork 后 child 把 x 从 10 改成 11，parent 为什么仍见 10？
+5. Exec 成功后为什么不会执行下一行？Wait 的 status 为什么不能直接当 exit code？
+6. Shell 的前台命令与后台命令，在等待上有什么不同？
+7. Ctrl-Z 与 SIGSTOP 有什么关系？为什么 handler 不用 printf？
+
+**A1.** A 可在 y 为 0、2、4 时读取。该结论假设 atomic accesses 和 sequential consistency；真实无同步 C 冲突访问可能构成 data race，行为未定义。
+
+**A2.** 两个操作可能在锁外读到同一个空位置，再先后覆盖。保护范围应覆盖构成一项逻辑更新的 search 与修改，并让所有冲突访问遵守同一协议。
+
+**A3.** 不是。Mutex 保证其他遵守该锁的线程不能进入，不保证 owner 不被抢占，也不确定 owner 何时继续。
+
+**A4.** 普通对象在两个私有地址空间中逻辑上独立。COW 是实现优化，不能改变这种语义。显式共享存储除外。
+
+**A5.** 成功 exec 替换旧 image，不返回旧调用点。Wait status 同时编码终止类别等信息，先检查 WIFEXITED / WIFSIGNALED，再提取对应值。
+
+**A6.** 前台通常等待命令结束再提示；后台立即允许继续交互，但仍需要之后回收 child。不能把后台等同于永远不 wait。
+
+**A7.** Ctrl-Z 通常发送 SIGTSTP；SIGSTOP 是不可捕获的停止信号。Printf 不保证 async-signal-safe，可能重入尚未一致的 library 状态。
+
+## 参考资料（可选）
+
+用于核对 API 规则；本讲的解释和例子已在正文展开，无需先阅读这些文档。
+
+- [POSIX memory synchronization](https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap04.html)
+- [exec semantics](https://pubs.opengroup.org/onlinepubs/9799919799/functions/exec.html)
+- [wait](https://pubs.opengroup.org/onlinepubs/9699919799/functions/wait.html)
+- [Signals overview](https://man7.org/linux/man-pages/man7/signal.7.html)
+- [Async-signal-safe functions](https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html)
+- [Go runtime](https://pkg.go.dev/runtime)

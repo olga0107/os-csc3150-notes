@@ -1,277 +1,381 @@
-# Lecture 1 · Introduction: What Is an Operating System?
+---
+prev: false
+next:
+  text: 'Lecture 2 · Four Concepts'
+  link: /notes/lec02-concepts
+---
+# Lecture 1 · OS 导论 {#lecture-1-·-why-operating-systems-exist}
 
-> CSC3150 · CUHK-Shenzhen · Fall 2026 · Slides adapted from Berkeley CS 162
+**TL;DR**
 
-**TL;DR**: The OS turns messy shared hardware into a **simple, private, seemingly-infinite virtual machine** for every application. It does this wearing three hats: **Referee, Illusionist, Glue**. We judge an OS by overhead, fairness, portability, reliability, security, and performance.
+- OS 一边分配和保护硬件资源，一边提供程序容易使用的接口。
+- Referee 管共享规则，illusionist 提供抽象，glue 提供共同服务。
+- 评价一个设计，要分清它改善了响应时间、吞吐量，还是可靠性等其他指标。
 
-***
+## 1. 设计难题 {#_1-why-os-design-is-hard-·-设备、时间尺度与复杂性}
 
-## 1. Why learn OS at all?
+**核心问题：为什么 OS 不能用一种策略让所有指标同时最好？**
 
-核心问题：这门课和我有什么关系？
+![Evolving device classes](../assets/lec01/page19.png)
 
-* **Every program you will ever write runs on an OS.** 程序的性能和行为不只由你的代码决定，还取决于底层 OS 怎么调度、怎么管内存。想真正优化一个程序，就得理解它脚下这一层。
-* **跨平台体感**：同一份逻辑跑在手机、电脑、IoT 设备上，行为差异会非常明显。懂 OS 才知道这些差异从哪来。
+设备类别不断扩展，资源预算从服务器到小型设备差异很大。历史上的周期性观察说明设计环境会变化，不是保证未来固定每十年出现某类产品的规律。
 
-***
+这张图同时比较两件事：
 
-## 2. Why is OS design so hard?
+- **横向看设备变化**：从 mainframe 到 PC、移动设备，再到更小的联网设备，计算机逐渐进入更多使用场景。
+- **纵向看每人可用的设备数量**：早期是许多人共享一台大机器，后来是一人一台，再到一个人同时使用多台设备。
+- **对 OS 的要求**：同样是管理 CPU、内存和设备，大型服务器强调吞吐量，小型设备可能更受电量和内存限制。因此，“都是计算机”不等于适合同一套资源策略。
 
-核心问题：为什么写一个 OS 比写普通软件难得多？
+![Historical latency comparison](../assets/lec01/page20.png)
 
-### a) The OS is everywhere, and it is never finished (Bell's Law)
+按“CPU 能做多少工作”来理解等待：
 
-![Bell's law](../assets/lec01/page19.png)
+- 历史示例中，main memory reference 约 100 ns，disk seek 约 10,000,000 ns，即 10 ms。
+- `10,000,000 / 100 = 100,000`：一次寻道的延迟，约为一次内存访问的十万倍。
+- 因此“人只等了很短一下”不表示 CPU 没有浪费大量可用时间。这正是后续 compute / I/O overlap 的动机。
 
-Roughly **every 10 years a new device class appears**: mainframe → PC → laptop → cell → cloud/IoT. Each one forces the OS to be rethought. OS 设计永远赶不上硬件形态的演化。
+Cache、main memory、storage、network 的访问延迟跨越多个数量级。图中是历史参考数量，不是当前机器的实测参数；学习目标是理解“等待慢设备时 CPU 可能有机会推进别的工作”。
 
-换个角度读这条定律，就是**人均设备数**的变化：从每百万人共享一台计算机，到每人一台，再到今天每人多台（家里的灯泡、空调里都是计算机）。下一个十年，这个数还会涨一个量级。
+假设任务计算 2 ms 后等待 I/O 20 ms。如果这段等待没有其他 ready 工作，CPU 会闲置；若另一个任务可运行，调度可以利用这段时间。等待和计算的具体重叠还受设备、依赖关系和 CPU 工作量限制。
 
-### b) One OS spans ~8 orders of magnitude in time
+![Software complexity over time](../assets/lec01/page21.png)
 
-![Jeff Dean's numbers](../assets/lec01/page20.png)
+复杂性为什么会增加？不只是“功能越来越多”：
 
-L1 cache reference costs **0.5 ns**; a CA↔Netherlands packet round trip costs **150,000,000 ns**. The OS must make correct decisions at *every* scale in between. 从纳秒级缓存到百毫秒级网络，调度策略没法"一刀切"。
+- **硬件不同**：服务器更关心吞吐量，小型电池设备还必须节能，不能简单照搬同一套策略。
+- **目标更多**：除了把程序跑完，还要及时响应、限制故障影响、防止越权访问。
+- **并行更多**：多核能一起工作，但共享数据也需要协调。
+- **兼容旧软件（legacy）**：新增功能时，往往还要让原来的程序和接口继续工作。
 
-不协调的代价很具体：**快任务会被慢任务挡住**，延迟被放大上百万倍。OS 就是在这 8 个数量级之间做协调的那一层。
+这些要求需要更多机制配合。图中的代码规模是历史背景，不能直接把代码更多理解成质量更好。
 
-### c) Complexity keeps exploding
+## 2. OS 是什么 {#_2-os-的位置与职责}
 
-![Lines of code growth](../assets/lec01/page21.png)
+**核心问题：有了 CPU 和 memory，为什么还需要 OS？**
 
-Original Unix: **4,501 LoC**. Linux 5.6: **27.8 M**. A modern car: **~100 M**. 课堂补充的数据点：Firefox 数百万行（浏览器大到有人争论它今天算不算一个 OS）、初代 Android 约 1000 万行、Windows 7 约 4000 万行、macOS 接近 1 亿行。车载代码量大有原因：大部分是安全性代码，车不能随便 crash。
+CPU 能执行指令，memory 能存储数据，设备能完成 I/O。但这些硬件能力没有直接回答：谁先用 CPU，程序能写哪些地址，文件怎样组织，设备怎样被不同应用使用。
 
-背后的驱动力：smarter hardware、higher reliability/security/efficiency expectations、以及永远不会消失的 legacy interfaces。
+**An operating system is system software that manages hardware resources and provides services and abstractions to applications.**
 
-而且这个趋势不会停：过去程序员刻意控制代码量，是为了人能读懂、能维护；**AI agent 写代码不在乎可读性**，"能塞多少塞多少"，未来 OS 的复杂度只会涨得更快。
+Kernel 是其中以特权运行、负责关键资源与保护机制的核心；完整 OS 还可以包含 libraries、utilities 等组件。
 
-***
+![OS between applications and hardware](../assets/lec01/page24.png)
 
-## 3. So, what *is* an OS?
+Applications 使用接口请求服务；OS 管理 CPU、memory 和 devices。普通用户指令通常直接由 CPU 执行，并非每一步都由 OS 软件解释。只有需要受控服务或发生特定事件时，执行才进入 kernel。
 
-**Definition v1: the resource layer**
+例如读取文件：应用请求“读取这个文件的下一段”，不必自己决定磁盘控制器命令、设备中断或其他进程能否同时访问设备。这种分工既降低编程负担，也让共享规则有统一执行者。
 
-![OS between apps and hardware](../assets/lec01/page24.png)
+## 3. 三个角色 {#_3-three-roles-·-分配、抽象、接口}
 
-> The layer of software interfacing **(many) applications** with **(diverse) hardware**.
+**核心问题：多个应用共用硬件时，OS 要解决哪三类问题？**
 
-**Definition v2: the virtual machine**（本课程真正的主线）
+![Three roles of an operating system](../assets/lec01/page27.png)
 
-> The OS implements a **virtual machine** per application whose interface is *more convenient* than raw hardware. Convenient means **portable, reliable, secure**.
+| Role | 先问的问题 | OS 提供的回答 |
+|---|---|---|
+| Referee | 谁可以用哪些资源？发生冲突怎么办？ | 分配规则、保护边界、受控通信 |
+| Illusionist | 应用能否用更简单的方式理解硬件？ | 独立执行流、地址空间等抽象 |
+| Glue | 不同应用怎样复用共同能力？ | 文件、网络、界面等标准服务 |
 
-![OS implements a virtual machine per application](../assets/lec01/page25.png)
+### Referee：分配与保护 {#referee-·-分配与保护}
 
-图里每个 Application 框看到的不是下面的 Hardware，而是 OS 提供给它的那台"更好用的虚拟机"，接口更 convenient（portable、reliable、secure）。
+**核心问题：一个程序一直计算，其他程序还有机会运行吗？**
 
-v1 说"OS 共享硬件"，v2 说"OS **改变硬件看起来的样子**"。从 v1 到 v2 的视角转换是整门课的钥匙。
+![OS as referee](../assets/lec01/page29.png)
 
-***
+假设 A、B 两个程序同时运行，会出现三类问题：
 
-## 4. Three hats of an OS
+- **Resource allocation（资源分配）**：只有一个 CPU 可用时，先运行 A 还是 B？各运行多久？
+- **Protection（保护）**：A 写错一个地址，能不能把 B 的数据也改坏？OS 要限制这种破坏。
+- **Communication（通信）**：如果 A 本来就需要把结果交给 B，OS 又要提供允许它们合作的途径。
 
-![Referee / Illusionist / Glue](../assets/lec01/page27.png)
+这就是 referee 的作用：既制定共享规则，也执行保护边界。
 
-### 4.1 Referee 🟥 protection, isolation, sharing
+**先读程序：为什么一个 A 会被打印很多次？**
 
-核心问题：多个**互不信任**的程序如何同时安全地跑？
-
-![Referee's three concerns](../assets/lec01/page29.png)
-
-| Concern | Question | Mechanism（后续章节展开） |
-| ---------------- | ------------------- | -------------------------------- |
-| Fault isolation | 程序之间、程序与 OS 之间如何隔离？ | Process, **dual-mode execution** |
-| Resource sharing | 下一个跑谁？物理资源怎么分？（1 TB 内存怎么分给 1000 个任务？平均分吗？） | Scheduling |
-| Communication | 程序间如何安全地交换结果？ | Pipes / sockets |
-
-Communication 的体感例子：你手动 copy-paste 两个程序间的数据，相当于**人自己当了总线**；Chrome 每个 tab 是独立进程，标签页之间要交换数据必须经 OS 协助。IPC（inter-process communication）解决的就是这件事。
-
-> 💡 **Dual-mode execution**：CPU 分 user mode 和 kernel mode。用户态程序不能直接碰硬件和别人的内存，危险操作必须经 **system call** 进入内核。这是"敢跑不可信程序"的硬件地基。
-
-#### Demo 1 · `cpu.c`: the many-CPUs illusion
-
-**先读懂参数**：`argc` 是命令行参数个数，`argv` 是参数数组。**`argv[0]` 永远是可执行文件自己的名字**，所以 `./cpu A` 时 argc = 2，`argv[1]` 才是 `"A"`。
-
-**What the code does**（逐行拆解）:
+下面是 `cpu.c` 的主体，头文件为 `<stdio.h>` 和 `<stdlib.h>`：
 
 ```c
 int main(int argc, char *argv[]) {
-    char *str = argv[1];            /* 命令行第一个参数，如 "A" */
-    while (1) { printf("%s\n", str); }   /* 无限循环打印它 */
+    if (argc != 2) {
+        fprintf(stderr, "usage: cpu LABEL\n");
+        return EXIT_FAILURE;
+    }
+    char *str = argv[1];
+    while (1) {
+        printf("%s\n", str);
+        fflush(stdout);
+    }
 }
 ```
 
-这个程序一旦启动就**永远不会自己结束**，是观察 OS 行为的完美"探针"。
+执行 `./cpu A` 时，从第一行往下跟：
 
-![cpu.c code, output options, and a segfault](../assets/lec01/page30.png)
+1. Shell 启动程序，把命令行拆成字符串参数：`argv[0]` 是 `"./cpu"`，`argv[1]` 是 `"A"`，所以 `argc = 2`。
+2. `argc != 2` 为假，跳过报错分支。如果只输入 `./cpu`，就会报错退出，避免把缺失参数交给 printf。
+3. `str = argv[1]`：str 保存字符串 A 的地址。这里没有打印，也没有把 A 转成数字。
+4. `while (1)`：条件一直为真，所以循环没有正常结束的出口。
+5. `printf("%s\n", str)`：沿 str 找到字符串，打印 A 并换行。`fflush(stdout)` 把暂存在输出缓冲里的内容交出去。
+6. 回到 while，再次打印 A。str 没变，因此这个程序自己不会突然打印 B 或 C。
 
-这张图的信息量很大：右上是单进程运行，全是 `A`；中间 a/b/c 是三个候选输出（全 A / 整齐 `ABCABC` / 无规律混合）；最下面还藏着一个小实验，`./cpu & ; ./cpu B` 直接 **Segmentation Fault**，因为第一条命令没带参数，`argv[1]` 不存在。
+参数数组末尾还有 `argv[2] = NULL`，它是结束标记，不算第三个参数。类似地，`./cpu 12` 传入的是字符串 `"12"`，要做整数运算还需解析。
 
-> ⚠️ 这段代码其实**不安全**：直接访问 `argv[1]` 却没有检查 `argc`。不带参数运行 `./cpu`，`argv[1]` 根本不存在，程序立刻 segfault。这里为了演示故意从简，正经代码必须先判 `argc >= 2`。
+**接着预测：三个这样的程序一起运行，会看到什么？**
 
-**先预测，再看结果**：三个死循环一起跑，输出会是什么样？
+- 只有 A：第一个程序一直循环，B 和 C 没机会执行？
+- 严格 `ABCABC`：OS 每打印一个字母就换一个程序？
+- A、B、C 都出现，但顺序和连续次数不固定？
 
-* A：全是 `A`（谁先跑谁霸占 CPU）
-* B：整齐的 `ABCABC`
-* C：无规律混合
+本机将三个实例的输出写到同一个文件，截取了连续 24 行。为方便比较，下列用空格代替换行，顺序保持不变：
 
-**The experiment**:
-
-```bash
-clang -o cpu cpu.c
-./cpu A & ./cpu B & ./cpu C &    # shell 的 & = 后台运行，同时存在 3 个进程
+```text
+A A B B A A A C C A A A C C C B B A A A C C C B
 ```
 
-Actual output captured on macOS（0.15 s 内的尾部切片）:
+这次观察对应第三种。**三个程序都有进展，但 OS 没有承诺按字母轮流。** 要理解原因，先设想只有一个 CPU core：
 
+1. A 正在运行时，这个 core 不能同时执行 B。
+2. 要让 B 前进，就必须暂时停下 A，记住 A 执行到哪里。
+3. 之后让 B 运行，再恢复 A。A 继续自己的循环，不必从 main 重新开始。
+4. 这种保存、恢复执行状态的过程叫 **context switch（上下文切换）**。
+
+**但 A 的循环没有主动写“让 B 运行”，谁取回 CPU？**
+
+- **Cooperative scheduling（协作式调度）**：依靠当前程序主动让出控制。若它一直计算且不让出，其他任务就可能一直等。
+- **Preemptive scheduling（抢占式调度）**：OS 预先设置 timer；时间到，硬件产生 interrupt，使 CPU 进入内核。OS 获得机会保存当前状态，选择接下来运行的任务。
+
+> 💡 Timer 不需要 while 循环同意，也不必等循环结束。因此，“程序逻辑上一直运行”可以由“获得 CPU → 暂停 → 恢复”的许多小段实现。程序看到持续的执行流，底层 CPU 却可以被多个任务共用。
+
+这个打印实验还有两点观察边界：输出可能因 I/O 等待而切换，不是每次换字母都代表 timer 到期；多核也可能同时执行多个实例，所以仅凭日志不能判断机器是否在单核交替。
+
+**自己运行时怎样观察？**
+
+```sh
+cc -std=c11 -Wall -Wextra demos/lec01/cpu.c -o /tmp/os-cpu-review
+/tmp/os-cpu-review A
 ```
-A B A A C A C B C B B A C B C B B A B C B C B C B C B A B A A C A C B ...
-```
 
-现代 OS 上答案是 **C**。但注意，**这个答案是"现代 OS"的答案**：回到 1980 年代，OS 一次只能跑一个任务，答案会是 A；在 Mac OS 9 / Win 3.1 这类 cooperative 系统上，答案同样是 A。选项和年代的对应关系，正是 preemptive scheduling 演化出来的证据。
+一个实例会持续打印 A，Ctrl-C 结束。在 shell 中，`&` 表示后台运行，例如 `./cpu A &`；它不是 C 中取地址的 `&`。后台进程需单独管理，初次实验可以先在两个终端分别运行 A、B，观察两者都能持续推进。
 
-**How to read this output**:
+从这个实验回到 referee：**共享 CPU 不只是在内存中放几个程序，还要有让出或取回控制、保存进度、选择下一项工作的机制。**
 
-1. 三个程序各自陷入死循环。理论上谁"先跑"谁就该永远霸占 CPU，输出应该全是 `A`。
-2. 实际却是无规律的交替。这说明有"第三者"在**反复打断**当前程序，把 CPU 交给下一个。这个第三者就是 OS。
-3. 交替无固定模式（不是整齐的 `ABCABC`），因为调度由 **timer interrupt** 触发，时机对程序不可见。
+### Illusionist：提供抽象 {#illusionist-·-提供抽象}
 
-**The mechanism**: 每次 timer interrupt 到来，CPU 自动跳转到内核。OS 保存当前进程的寄存器现场（**context**），加载另一个进程的现场继续跑。这就是 **context switch**。切换足够快（毫秒级），每个进程就感觉自己在连续执行，这就是 **virtualized CPU**。
+**核心问题：应用为什么不必知道其他程序占了哪些物理地址？**
 
-> 💡 **Cooperative vs preemptive**：如果 OS 只能*等程序主动*交出 CPU，即 **cooperative multitasking**（Mac OS 9 / Win 3.1 时代），这个 `while(1)` 程序会永远霸住处理器，**整机卡死**。现代 OS 用 **preemptive multitasking**：timer interrupt 是硬件行为，不需要程序配合，OS 随时能夺回控制权。一个死循环最多占满它自己的时间片，拖不垮系统。
+![A virtual machine for each application](../assets/lec01/page25.png)
 
-### 4.2 Illusionist 🎩 hide hardware limits via virtualization
+OS 给应用提供便于使用的抽象：thread 看起来有持续的执行流，process 看起来有自己的 address space，file 看起来是有名称的持久数据。这里的 “virtual machine” 是广义抽象，不专指运行另一个 guest OS 的完整虚拟机。
 
-核心问题：如何让每个程序都觉得自己独占一台无限强的机器？
+**先读程序：这次不断变化的是什么？**
 
-* **All alone**: exclusive use of the machine
-* **All powerful**: resources feel infinite
-* **All expressive**: capabilities that don't physically exist
-
-注意 all powerful 是假象而不是承诺：在一块智能手表上 `malloc` 100 GB，大概率失败，但*偶尔*真能成功（有 swap 和虚拟内存时）。假象的边界本身就是设计的艺术。
-
-#### Demo 2 · `memory.c`: the private-memory illusion
-
-**What the code does**（逐行拆解）:
+下面保留 `memory.c` 的计数逻辑，省略演示用的延时与整数上限处理；运行时使用仓库里的完整版本：
 
 ```c
-int *p = malloc(sizeof(int));              /* 堆上申请 4 字节，p 存其地址；malloc ≈ C++ 的 new */
-printf("(%d) p: %p\n", getpid(), p);       /* getpid() = 进程 ID；%p 打印 p 里的地址值 */
+int *p = malloc(sizeof *p);
+if (p == NULL) return 1;
+printf("(%ld) address: %p\n", (long)getpid(), (void *)p);
 *p = 0;
-while (1) { *p += 1; printf("(%d) p: %d\n", getpid(), *p); }   /* 反复给 *p 加 1 并打印 */
+while (1) {
+    *p = *p + 1;
+    printf("(%ld) value: %d\n", (long)getpid(), *p);
+}
 ```
 
-注意区分两个东西：`p` 是**地址**（这 4 字节"在哪里"），`*p` 是**值**（那 4 字节里"存了什么"）。
+1. `sizeof *p` 求一个 int 对象需要的字节数；`malloc` 申请这些空间，返回地址。失败时返回 NULL，因此先检查。
+2. `p` 存地址，`*p` 表示这个地址上的 int。第一条 printf 的 `%p` 打印地址，括号里则是 `getpid()` 查到的进程编号。
+3. `*p = 0` 沿 p 找到对象，把其中的值设为 0。p 本身没有变成 0。
+4. 第一次循环读取 0，加 1，再写回，所以 value 输出 1。第二次同理得到 2。
+5. 程序没有重新给 p 赋值，也没有再次 malloc；始终在修改最初申请的那个 int。
 
-`getpid()` 返回的 PID 是 OS 给每个进程分配的身份证号。课后可以在终端跑 `ps` 亲眼看看：系统里每个进程都有自己的 PID，Chrome 每开一个 tab 就多一个进程。
+**再预测：启动两个实例，是共同数到 6，还是各自数到 3？**
 
-**先预测**：两个进程打印同一个地址，各自的计数器会怎样？混在一起互相覆盖，还是各自独立增长？
+如果它们修改的是同一个 int，那么一边的更新就会影响另一边。如果是两个独立对象，就应当各自从 0 开始。
 
-![memory.c code and two prediction options](../assets/lec01/page34.png)
+本机实际同时启动两个实例，前几行如下：
 
-a) 是"共享内存"的预测：计数器交叉混成 1, 2, 3, 4, 5, 6。b) 是"各自独立"的预测：两边各数各的 1, 2, 3。右上已经剧透了关键事实：两个进程 PID 不同（120 和 254），打印的地址却都是 `0x200000`。
-
-**The experiment**（本机真实运行，两个进程同时跑）:
-
+```text
+实例一                         实例二
+(18291) p: 0x100b39b10         (18292) p: 0x1023d9b10
+(18291) p: 1                  (18292) p: 1
+(18291) p: 2                  (18292) p: 2
+(18291) p: 3                  (18292) p: 3
 ```
-(5536) p: 0x102b9da60      (5535) p: 0x104d45a60
-(5536) p: 1                (5535) p: 1
-(5536) p: 2                (5535) p: 2     ← 两个计数器完全独立
-(5536) p: 3                (5535) p: 3
+
+两边各有自己的计数器。不过，这次地址不同还不够回答更关键的问题：**如果两个实例打印的地址数值相同，会不会变成同一个计数器？**
+
+答案仍然不一定相同。普通进程私有内存可以这样理解：
+
+```text
+Process P：virtual address 0x200000 → P 的物理存储 → 值 1
+Process Q：virtual address 0x200000 → Q 的物理存储 → 值 1
 ```
 
-课件里 Linux 上的版本更戏剧化：两个进程打印出**完全相同的地址** `0x200000`，计数器却互不干扰。（macOS 上实测地址不同，因为 macOS 默认开 ASLR 随机化地址，但结论一样：各自的计数器互不可见。）
+- **如果是同一个物理地址**，就指向同一个存储位置。
+- 但程序使用的是自己 address space 中的 **virtual address（虚拟地址）**。同一个编号放在两个不同地址空间里，可以翻译到不同位置。
+- OS 设置映射，由地址翻译硬件在访问时执行。程序不用先打听“别的程序把哪里占了”，仍能访问自己的对象。
 
-**Why this is astonishing**: 两个进程都在对"自己看到的那个地址"读写。如果程序直接操作**物理内存**，相同地址就是同一个内存单元，两个计数器必然互相覆盖（你加 1 我也加 1，数字会翻倍乱跳）。事实没有发生，所以程序看到的地址**不是**物理地址。
+> 💡 比较指针时，要同时问“哪个进程中的地址”。两个家庭都有 101 房间，不意味着同一间房。Virtual memory 让程序使用便于理解的地址视图，也为限制访问范围提供机制。
 
-> 💡 **Virtual memory**：每个进程看到的地址是**虚拟地址**，OS 借助硬件 **MMU** 和 **page table** 把它翻译成各自不同的物理位置。效果：每个进程都以为自己独享一块从熟悉地址开始的连续内存。**隔离性**（谁也碰不到谁）和**便利性**（不用关心物理内存在哪）一次搞定。Address Space 章节会完整展开翻译机制。
+本次实测地址不同，说明不能把“两个进程地址必须一样”当成实验要求；ASLR、分配器和运行环境都可能影响数值。**需要解释的是地址属于谁、对应哪个对象，而不是记住某个十六进制数字。**
 
-**反向验证**：如果没有 virtual memory，任何程序的一个野指针 bug 就可能改写别的进程、甚至内核的内存，multiprogramming（多程序共存）根本不可能安全实现。这也是为什么 virtual memory 是 Referee（隔离）和 Illusionist（假象）两顶帽子的交汇点。
+**Illusionist 的三个侧面：**
 
-### 4.3 Glue 🩹 common services
+- **All alone**：应用以自己的执行流和地址空间工作，不必手工避开其他程序的普通变量。
+- **All powerful**：以可申请资源的抽象编程，不必预先知道每一块物理资源在哪；资源仍可能不足。
+- **All expressive**：软件组合已有硬件能力，提供硬件本身没有直接提供的接口，例如 file、socket。抽象能力不等于没有实现成本。
 
-核心问题：如何避免每个程序都重造轮子？
+**运行 memory 示例**
 
-File system、UI、networking 等标准服务带来三个好处：sharing easier（大家用同一套 primitives）、reuse maximized、components evolve independently。
+```sh
+cc -std=c11 -Wall -Wextra demos/lec01/memory.c -o /tmp/os-memory-review
+/tmp/os-memory-review
+```
 
-三顶帽子之外记住一个定位：**OS 终究是应用的仆人（servant）**。裁判、魔术师、胶水，所有机制最终都是为应用服务的。
+在两个终端各运行一次即可比较；用 Ctrl-C 结束。完整版本把输出放慢以便阅读，并避免计数持续增长导致有符号整数溢出。
 
-### Putting it together
+想单独确认命令行参数，可以运行 `demos/lec01/arguments.c`：
 
-![Referee + Illusionist + Glue = easy-to-use VM](../assets/lec01/page37.png)
+```sh
+cc -std=c11 -Wall -Wextra demos/lec01/arguments.c -o /tmp/os-arguments
+/tmp/os-arguments A 12
+```
 
-左边是现实：一堆杂乱的 processor、memory、storage、networks。右边是每个程序*看到*的世界：infinite processors、infinite memory、标准服务。**这个从"杂乱共享"到"私有虚拟机"的变换，就是 OS 本身。**
+实际输出：
 
-***
+```text
+argc = 3
+argv[0] = /tmp/os-arguments
+argv[1] = A
+argv[2] = 12
+argv[argc] is NULL: yes
+```
 
-## 5. How do we judge an OS?
+### Glue：共同服务 {#glue-·-统一接口}
 
-核心问题："好 OS"的标准是什么？abstractions must be **efficient, low-overhead, equitable**。
+**核心问题：为什么应用不必为每一种磁盘写一套读文件逻辑？**
 
-| Criterion | Meaning | 关键词 |
-| ----------- | -------------------- | ----------------------------------------- |
-| Overhead | 提供 abstraction 的额外代价 | virtualization is not free |
-| Fairness | 资源在应用间分配是否公平 | scheduling policy |
-| Portability | 硬件变了，app/OS 要改多少 | **AMI / HAL**（见下图） |
-| Reliability | 系统做它该做的；OS 挂掉是灾难性的 | availability = f(MTTF, MTTR) |
-| Security | 攻击下维持正常功能 | integrity + privacy |
-| Performance | 满足用户与管理员预期 | response time, throughput, predictability |
+例如，编辑器想把文字保存到文件，不应为每一种磁盘重新写一套保存逻辑：
 
-Reliability 有一个现实锚点：**2024 年 7 月 19 日的 CrowdStrike 事件**。一个安全软件的故障更新让全球约 850 万台 Windows 机器蓝屏，机场值机、医院、银行大面积停摆，被称为史上最大规模的 IT 事故。这就是为什么 OS 级故障是 catastrophic 的，也解释了为什么要同时量化两个指标：**MTTF**（mean time to failure，多久坏一次）和 **MTTR**（mean time to repair，坏了多久能修好）。故障不可能完全避免时，修得快和坏得少同样重要。
+1. 编辑器调用系统提供的文件接口，表达“把这些内容写入这个文件”。
+2. OS 处理文件位置、访问权限等共同问题。
+3. **Device driver（设备驱动）** 再把请求转成具体设备能执行的操作。
 
-Portability 值得单独看，它解释了所有现代 OS 的分层设计：
+应用使用共同接口，设备差异由下层处理。这样既能复用文件服务，也更容易更换硬件。
 
-![AMI and HAL](../assets/lec01/page39.png)
+![Application and hardware interfaces](../assets/lec01/page39.png)
 
-* **AMI (Abstract Machine Interface)**: 面向应用的 syscall 接口，硬件变了它也**保持稳定**。
-* **HAL (Hardware Abstraction Layer)**: 面向设备的一层，吸收硬件差异。
-* 不可能每出一款新硬件就重写所有 app，而且必须**为还不存在的硬件做设计**。
+把层次中的两条边界分开：
 
-***
+1. **AMI（Abstract Machine Interface）面向应用**：规定应用怎样请求服务。例如“打开文件、读取内容”，不要求应用自己发送磁盘控制命令。
+2. **HAL（Hardware Abstraction Layer）面向硬件**：下层实现适配具体设备，让上层尽量使用共同的操作方式。
+3. **换硬件时**：尽量改动驱动等适配部分，保持应用依赖的接口。这就是 portability（可移植性）的设计方向。
 
-## 6. Why this course matters more in the AI age
+这里说的是减少改动，不是保证任意二进制文件跨平台直接运行；指令集、二进制接口和系统 API 仍需兼容。
 
-Rich Sutton (Turing Award 2024), *The Bitter Lesson*: **handcrafted knowledge plateaus; learning + search scale with computation.**
+### 三个角色的配合 {#三个角色如何一起工作}
 
-国际象棋是最好的例证：早期人们把手写的下棋技巧塞进机器，全部撞上瓶颈；只有等算力增长、让机器自己学，才真正成功。这条脉络一路从 AlphaGo 走到 deep learning 再到今天的 LLM。
+![Physical resources and per-program abstractions](../assets/lec01/page37.png)
 
-本课的补充视角：**systems unlock that computation**。
+- **物理层**：processor、memory、storage、network 和 input/output devices 是共同的底层资源。
+- **应用视图**：每个 program 使用自己的执行与内存抽象，并通过 storage / network manager、GUI 等接口请求服务。
+- **OS 的工作**：把多个应用的请求映射到同一套硬件，同时实施分配和保护。
+- **Infinite 的边界**：表示编程视图隐藏部分资源限制，不是承诺无限实际容量或计算速度。
 
-![AI demand vs Moore's law](../assets/lec01/page47.png)
+以两个程序同时“读文件并处理数据”为例，可以把左右两侧接起来：
 
-AI 训练需求每 18 个月涨 **10×**，Moore's Law 只给 **2×**，缺口越来越大。GPU/专用芯片、从 server 到 pod 的规模化，全都依赖更好的 scheduling、memory、parallelism、networking。全是 OS 的活。
+1. 每个程序各自调用文件接口，这体现 **glue** 提供共同服务。
+2. 处理数据时各用自己的变量与执行流，这体现 **illusionist** 提供便于编程的视图。
+3. 底下仍共用 CPU、内存和存储设备；谁先用、谁能访问哪些内容，由 **referee** 实施分配和保护。
 
-> Takeaway: **More efficient computation creates more room for intelligence.** Scale changes, hardware changes, application changes, so the OS will keep changing.
+所以三个角色会出现在同一次操作中，不是三套互不相干的 OS。
 
-***
+## 4. 评价标准 {#_4-evaluation-·-怎样评价设计}
 
-## 7. Self-check
+**核心问题：为什么需要权衡，如何判断一种设计是否合适？**
 
-1. 用一句话向没学过 CS 的人解释 OS 是什么。
-2. `memory.c` 里两个进程地址相同却互不干扰，靠的是什么机制？如果关掉它会发生什么？
-3. Preemptive vs cooperative multitasking 的区别？哪一种能让一个死循环程序冻住整机？
-4. Referee / Illusionist / Glue 各管什么？dual-mode execution 属于哪一顶 hat 的职责？
-5. 为什么 portability 要求 AMI 稳定而 HAL 可变？
+### 性能与可靠性 {#评价指标与可用性}
 
-<br />
+**核心问题：说一个 OS “更好”，具体是哪个指标更好？**
 
-**A1.** OS 是一层软件，把杂乱共享的硬件变成每个程序眼中一台**简单、私有、看起来无限大的专属电脑（virtual machine）**。
+| Criterion | Meaning | Example / tradeoff |
+|---|---|---|
+| Correctness | 满足定义的行为与约束 | 一个 process 不能任意写另一个的私有内存 |
+| Response time | 单次请求从发起到完成的时间 | 编辑器按键何时显示 |
+| Throughput | 单位时间完成的工作量 | 每秒处理多少请求 |
+| Predictability | 延迟或行为变化是否可控 | 平均快但偶尔卡很久仍可能不可接受 |
+| Overhead | 实现抽象额外花费的资源 | 调度、地址管理也消耗时间与内存，OS 自身不应成为主要负担 |
+| Fairness | 分配是否符合选定的公平目标 | 长任务不应使其他任务无限等待 |
+| Reliability | 持续正确运行的能力 | 故障发生频率 |
+| Availability | 需要时可提供服务的比例 | 故障恢复速度也重要 |
+| Security / privacy | 防止未授权操作或信息泄露 | 文件访问权限、内存隔离 |
+| Portability | 适配不同平台的难易程度 | 把硬件相关部分隔离到清晰接口后面 |
+| Energy efficiency | 完成工作消耗的能量 | 空闲时进入低功耗状态 |
 
-**A2.** 靠 **virtual memory**：程序看到的地址是虚拟地址，OS 借助硬件 **MMU** 和 **page table**（虚拟地址 → 物理地址的字典）把每个进程的虚拟地址翻译到**不同的物理位置**，所以同地址、不同内存。**如果关掉它**（程序直接用物理地址）：两个进程写同一地址 = 写同一内存单元，计数器互相覆盖；更糟的是任何程序的野指针 bug 都能改写别的进程甚至内核，multiprogramming 根本没法安全实现。
+**Fairness 不等于机械地平均分。** 如果 A 需要 10 GB、B 只需要 1 GB，把每个进程都分配相同容量未必合理。公平要先说明规则，例如是否按需求分配、是否保证任务不会一直得不到 CPU。
 
-**A3.** 区别在于**谁收回 CPU 控制权**：
+Security 也有不同侧面：**integrity（完整性）**关注数据和执行不被非法篡改；**privacy（隐私）**关注数据不被未授权者读取。
 
-| | Cooperative | Preemptive |
-| ------ | ------------------ | ------------------------------- |
-| 谁决定切换 | 程序**主动**交出 CPU | OS 靠硬件 **timer interrupt 强制**收回 |
-| 死循环后果 | **整机卡死**（永不 yield） | 只占满自己的时间片，系统照常 |
-| 代表 | Mac OS 9 / Win 3.1 | 所有现代 OS |
+在简单稳定的故障与修复模型中：
 
-会冻住整机的是 **cooperative**。
+```text
+Availability ≈ MTTF / (MTTF + MTTR)
+MTTF = mean time to failure
+MTTR = mean time to repair
+```
 
-**A4.** **Referee** = protection / isolation / sharing（process、dual-mode execution、scheduling、pipes）；**Illusionist** = virtualization 假象（virtual memory、virtualized CPU）；**Glue** = common services（file system、network、UI）。**Dual-mode execution 属于 Referee**：user mode 下程序碰不了硬件和别人内存，危险操作必须走 system call 进 kernel mode，裁判靠这条红线执法。
+例如平均运行 99 小时后故障、平均修复 1 小时，availability 约为 99%。提高可靠性和缩短恢复时间都能提高可用性。现实系统更复杂，不能把这个近似当作适用于所有服务的测量定义。
 
-**A5.** **AMI** 是 OS 对**应用程序**的承诺（`fork()`、`read()` 等 syscall），全世界软件都照着它写。它跟着硬件变，生态就会崩溃，所以必须**几十年稳定**。**HAL** 是 OS 内部面向硬件的一层，新设备来了只改 HAL/驱动，应用无感。一句话：**对上用不变的接口稳住应用生态，对下用可换的一层吸收硬件变化**，这就是"为还不存在的硬件做设计"。
+**用打印任务区分三个性能指标：**
 
-***
+- **Response time（响应时间）**：提交一份文件后，多久能拿到结果？关注一次请求等多久。
+- **Throughput（吞吐量）**：一小时总共打印多少份？关注完成工作的总速度。
+- **Predictability（可预测性）**：同样的小文件，是通常都等几秒，还是有时等几分钟？关注表现是否稳定。
 
-*Images extracted from the official Lecture 1 slides. Notes rewritten in my own words for review; errors are mine.*
+把很多任务攒成一批，可能减少切换成本、提高吞吐量，但先提交的小任务也可能因此等得更久。**评价设计前，要先明确希望改善哪个指标。**
+
+## 5. AI 与系统 {#_5-os-in-the-ai-age-·-新负载带来什么挑战}
+
+**核心问题：硬件和应用变了，OS 的问题是否消失？**
+
+AI 工作负载扩展了 accelerator、memory bandwidth、distributed communication 等资源需求。CPU、GPU、网络和存储需要协调；运行多个任务时仍需要分配、隔离、通信与故障处理。
+
+“The Bitter Lesson” 在这里提供一个背景观点：能够利用更多 computation 的通用 search / learning 方法具有扩展优势，系统效率决定可用计算能否转化为实际工作。这不是 OS 的定义，也不是对所有 AI 方法效果的无条件保证。
+
+![Historical demand and accelerator supply](../assets/lec01/page49.png)
+
+需求趋势与单处理器能力增长之间可能出现缺口。GPU 等 accelerator 提高特定计算的供给，但单设备的提升不自动解决规模问题；扩展到多设备、多个服务器后，又要管理数据移动、网络通信、并行执行和故障。
+
+专用硬件和集群可以提高特定工作的能力，也带来不同的资源瓶颈。历史增长曲线和未来预测用于说明这种变化方向，不作为永远有效的性能承诺。
+
+本节与前三个角色的关系是：资源种类增多，referee 的分配问题更复杂；新的硬件需要合适的 abstractions；接口仍要连接应用与实现。
+
+## 6. 后续机制 {#_6-从职责到机制}
+
+**核心问题：三个角色如何变成具体机制？**
+
+| Role | Next mechanism |
+|---|---|
+| Illusionist | Thread 与 address space 描述应用看到的运行环境 |
+| Referee | Process isolation、dual mode 与地址检查落实保护 |
+| Glue | System call interface 提供受控服务入口 |
+
+阅读下一讲时始终问：这是在保存执行状态，还是在限制访问权限？前者通向 thread 与 scheduling，后者通向 address space 与 protection。
+
+## Self-check
+
+1. 两个计算程序都有输出，是否证明 parallelism？
+2. 若一个程序不主动 yield，OS 如何重新获得控制？
+3. 两个 process 的指针数值相同，是否操作同一对象？
+4. Response time 与 throughput 有何区别？
+5. 一个文件读取 API 如何同时体现 referee、illusionist、glue？
+
+**A1.** 不证明。单核交替执行也可以产生交错输出。Parallelism 要求执行在时间上真正重叠。
+
+**A2.** 配置 timer interrupt，硬件把控制交给受保护的 kernel 入口，由内核决定继续或切换。用户程序不能拥有任意关闭这项保护的权限。
+
+**A3.** 不一定。指针是所在 address space 中的 virtual address，翻译结果可以不同。显式共享映射需另行分析。
+
+**A4.** 前者描述一次请求等待多久，后者描述单位时间完成多少工作。优化一个可能损害另一个。
+
+**A5.** Referee 检查权限并协调资源；illusionist 把设备块与控制器抽象成文件；glue 提供应用和多种设备实现共同使用的接口。

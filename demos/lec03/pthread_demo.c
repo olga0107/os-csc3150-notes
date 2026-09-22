@@ -1,3 +1,6 @@
+/* INTENTIONALLY UNSAFE teaching specimen: common++ has a C data race.
+ * Its output is not a correctness guarantee. See pthread_review.c and
+ * ../lec04/mutex_counter.c for synchronized examples. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>

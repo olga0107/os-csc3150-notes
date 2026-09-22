@@ -1,398 +1,482 @@
-# Lecture 2 · Four Fundamental Concepts: Thread, Address Space, Process, Dual Mode
+---
+prev:
+  text: 'Lecture 1 · Introduction'
+  link: /notes/lec01-introduction
+next:
+  text: 'Lecture 3 · Threads & Processes'
+  link: /notes/lec03-thread-process
+---
+# Lecture 2 · 四个概念 {#lecture-2-·-execution-and-protection}
 
-> CSC3150 · CUHK-Shenzhen · Fall 2026 · Slides adapted from Berkeley CS 162
+**TL;DR**
 
-**TL;DR**: 一个运行中的程序 = **Address Space**（内存视图）+ 一个或多个 **Thread**（执行上下文）。OS 用时间复用把单核变成多个 vCPU（illusionist 的工作），用 **dual mode** + 地址翻译把进程彼此隔离（referee 的工作）。这四个概念是后面所有章节的基本词汇。
+- Thread 记录执行进度，address space 描述内存视图，process 把它们组织成运行环境。
+- 程序使用虚拟地址，硬件根据 OS 设置的规则完成翻译和检查。
+- User / kernel mode 限制谁能修改这些保护规则。
 
-***
+## 1. 虚拟化 {#_1-virtualization-·-从-os-抽象进入四个概念}
 
-## 1. Recap: virtualization at two levels
+**核心问题：能否把完整 OS 也放进一个虚拟运行环境？**
 
-上节课的结论：OS 给每个 process 提供"独占机器"的假象。
+![OS virtualizes hardware to applications](../assets/lec02/page03.png)
 
-![OS virtualizes hardware for processes](../assets/lec02/page03.png)
+1. **Applications → OS**：不同 process 请求共同硬件的服务。
+2. **OS → hardware**：OS 管理 CPU、memory、storage 与 I/O controller，向上提供较高层抽象。
+3. **继续抽象**：如果上层运行的也是一个 OS，就需要向它提供虚拟硬件接口，这一层由 hypervisor 实现。
 
-进程（Process 1 / 2）坐在 OS 层之上，OS 坐在硬件（CPU、Memory、Storage、网卡、键盘、显示器）之上，所有硬件通过 **I/O Ctrl**（I/O controller）互联。注意幻灯片底部对 virtualization 的定义：提供"独占机器 + 无限内存和处理器"的假象，但 **performance 会有损失**。假象不是免费的。
+![Bare-metal hypervisor and guest operating systems](../assets/lec02/page07.png)
 
-同样的思路可以再叠一层，把 OS 自己也变成被虚拟化的对象：
+- `Operating System 1 / 2` 是两个 guest，各自管理自己的 processes。
+- Hypervisor 管理它们使用的共同硬件资源；bare-metal 结构中，它直接位于 hardware 之上。
+- Hosted 结构则多一层 host OS。层数改变了，核心问题仍是“给谁提供什么接口、谁负责隔离与分配”。
 
-![Hypervisor virtualizes hardware for OSes](../assets/lec02/page08.png)
+![Hosted virtualization](../assets/lec02/page08.png)
 
-* 最顶层 `Process 1,1`、`Process 1,2`、`Process 2,1`、`Process 2,2`：命名规则是"虚拟机编号, 进程编号"，即 VM1 里跑两个进程、VM2 里跑两个进程。
-* **Operating System 1 / 2**：两个 guest OS，各自以为自己独占整台机器。
-* **Hypervisor**（红色）：对 guest OS 扮演"硬件"的角色，提供和真实硬件**相同**的抽象。老师点评它 "just a way of playing the system"：定义是递归的，OS 虚拟化硬件给进程，hypervisor 虚拟化硬件给 OS。
-* **Operating System 0**：host OS，真正贴着硬件跑。你在 Mac 上用 VMware/UTM 跑 Linux 就是这个结构。
-* 价值：**fault isolation**。一个 VM 里的 OS 崩了，其他 VM 完全不受影响。云计算把一台物理机切成几百台卖，靠的就是这一层。
-
-***
-
-## 2. 四个基本概念
-
-| Concept | 一句话定义 | 角色 |
+| Layer | 服务对象 | 提供的抽象 |
 |---|---|---|
-| **Thread** | execution context：PC + registers + stack + flags，完整描述"程序跑到哪了" | 并发的载体（active） |
-| **Address space** | 程序可访问的内存地址集合及其内容 | 保护的边界（passive） |
-| **Process** | address space + 1 个或多个 thread，且权限受限 | 程序运行的容器 |
-| **Dual mode** | CPU 分 user/kernel 两态，配合地址翻译做隔离 | 保护的硬件地基 |
+| OS | Application / process | 执行流、地址空间、文件等 |
+| Hypervisor | Guest OS | 虚拟硬件环境 |
 
-注意 address space 定义里的一句：它**可能**不同于机器的物理内存（distinct from memory space of the physical machine），此时程序就活在 **virtual address space** 里。这正是 lec01 `memory.c` 背后的机制。
+- **Hosted**：hypervisor 运行在 host OS 之上。
+- **Bare-metal**：hypervisor 直接管理硬件。
 
-***
+多个 guest 有各自的 processes。隔离可以限制故障传播，但不是“其他 VM 绝对不受影响”的保证：它们仍可能竞争底层资源，也依赖共同的 hypervisor 和硬件。
 
-## 3. 一个程序是怎么跑起来的
+## 2. 程序执行 {#_2-execution-·-程序如何运行}
 
-### 3.1 从源代码到进程
+**核心问题：磁盘上的程序怎样变成 CPU 正在执行的工作？**
 
-![From foo.c to a running program](../assets/lec02/page10.png)
+![Loading a program](../assets/lec02/page10.png)
 
-1. **Program Source**（`foo.c`）：你在 editor 里写的 `int main(){...}`。**Code is just text**：源代码只是人类可读的文本，本身不能执行。
-2. **compiler**：编译成 **Executable**（`a.out`）。可执行文件内部已经分好两块：**instructions**（机器码）和 **data**（全局变量的初始值）。
-3. **Load & Execute**：OS 把这两块装进内存，再创建 stack 和 heap，最后把控制权交给程序。
+1. **Compile / link**：把 source code 转为 executable。
+2. **Load**：建立 address space，映射代码和数据，准备初始 stack 等状态。
+3. **Start**：从程序入口开始执行，runtime 初始化后调用 `main`。
 
-右侧的内存布局图从下往上读：
+这是一幅概念布局：实际系统可能按需加载，有多个 mappings，未初始化的 static storage 可以零初始化而不把所有零逐字保存在 executable 中。
 
-* `0x000…`（低地址）在**底部**，`0xFFF…`（高地址）在**顶部**。
-* 最底部是 **instructions**，往上依次 **data → heap → stack**。
-* heap 的箭头**朝上**（向高地址增长），stack 的箭头**朝下**（向低地址增长）。两者向对方生长，中间的空隙就是各自的余量。
-* 最顶部橙色区域是 **OS** 自己占的内存。
-* 下方 Processor 框里，**Program counter** 指向 instructions 区域：PC 正指着程序的第一条指令，程序即将开始执行。
+![Instruction and data paths through the processor](../assets/lec02/page11.png)
 
-### 3.2 CPU 内部：Fetch / Decode / Execute 循环
+**把取指与处理数据分开：**
 
-先看数据通路，这是整个循环的硬件底图：
+1. **Fetch**：按 PC 从 memory 取 instruction。
+2. **Decode**：control logic 识别要做什么，例如 add、load 或 branch。
+3. **Execute**：读取所需 registers，完成运算或发起 memory access。
+4. **Write back / next PC**：把结果写回相应位置，再决定下一条 instruction。
 
-![Instruction fetch/decode/execute data path](../assets/lec02/page11.png)
+Instructions 和 data 都在 memory 中，但作用不同：前者决定“做什么”，后者是被读取、计算或修改的内容。
 
-Processor 一侧，**Program counter** 指着内存里的 `instruction`，fetch 取进来，**decode** 译码，然后交给 **Execute**（漏斗形的 ALU）结合 **Registers** 里的数据运算，结果可以写回寄存器，也可以写进内存的 `data` 区。注意右侧黄色的 Memory 是**一整块**：instruction 和 data 住在同一块内存里，下一张图会展开这个性质。
+用一条简化机器指令 `ADD R3, R1, R2` 对照这些箭头。它表示“把 R1 与 R2 相加，结果放进 R3”：
 
-![Instruction cycle](../assets/lec02/page13.png)
+1. PC 保存**指令的地址**。从 PC 通向 memory 的箭头用于找到 ADD 指令，不是去找加法结果。
+2. Decode 识别出 ADD，并知道要读取 R1、R2。
+3. Registers 向运算单元提供两个值，例如 3 和 4；运算结果 7 写入 R3。
+4. 这条 ADD 不需要把结果立即写回普通内存。若之后执行 store 指令，才沿数据通路把值写入指定内存位置。
+5. 控制逻辑更新 PC，继续取下一条指令。遇到 branch、call、return 时，下一条位置可能改变。
 
-* Processor 里的寄存器分三类：**R0…R31**（32 个通用寄存器）、**F0…F30**（浮点寄存器）、**PC**（program counter）。寄存器里装的是整数、指针这类小数据，SP（stack pointer）就是一个指向栈顶地址的指针。数量上，一台机器通常有 32 或 64 个通用寄存器。
-* CPU 内部还有一层分工：**control unit** 负责取指、译码、决定下一条执行哪条（所以 PC 不总是顺序前进，if/while 会产生跳转）；**ALU**（arithmetic/logic unit）负责真正算数。多核机器就是每个核各有一套 control unit 和 ALU。
-* 内存从 `Addr 0` 到 `Addr 2³²-1`（32 位机的例子，地址空间 4 GB）。
-* 关键观察：内存里 `Inst0、Inst1…Inst237`（指令）和 `Data0、Data1`（数据）**混放在同一块内存**。这就是 **von Neumann architecture** 的定义性特征：指令和数据同台，程序因此可以被当成数据来加载、修改、存储。
-* 右侧一排 `←PC` 箭头是 PC 的移动轨迹：指向 `Inst0`，执行完指向 `Inst1`，一路向下"行军"。
-* 执行序列：**Fetch（按 PC 取指）→ Decode → Execute（可能用寄存器）→ 写回寄存器/内存 → PC = 下一条 → Repeat**。再花哨的程序，拆到底都是这个循环在重复。
+**PC 中存的是“去哪里取指令”，R1、R2 中存的是“这次拿什么来算”。** 它们都属于执行现场，但作用不同。
 
-***
+![CPU execution cycle](../assets/lec02/page13.png)
 
-## 4. Concept 1: Thread（执行上下文）
+```text
+PC → fetch instruction → decode → execute → update state → next PC
+```
 
-**定义**：thread 是 single unique execution context，包含 **PC、registers、execution flags、stack、memory state**。它完整回答一个问题："这个程序此刻跑到哪、手上拿着什么？"
+- **PC (program counter)**：记录取指位置，回答“接下来执行哪里”。
+- **Registers**：保存当前运算使用的数据。
+- **SP (stack pointer)**：记录当前栈位置。
+- **Branch / call / return**：改变执行路径，因此 PC 不一定顺序前进。
 
-一个 thread 只有两种状态：
+Von Neumann 的核心思想是指令和数据都存储在内存中。寄存器数量、指令长度、访问细节因 architecture 而异。32-bit byte addressing 的理论编号范围是 `0 .. 2^32-1`，即 4 GiB；这不保证所有编号都有可访问存储。
 
-* **Executing（resident）**：thread 的 context 正装在 CPU 寄存器里。PC 指向它的下一条指令，SP（stack pointer）指向它的栈顶。
-* **Suspended**：context 不在寄存器里，而是**被复制一份存到了内存**。PC 寄存器此时正指着别的 thread 的指令。
+## 3. 执行与内存 {#_3-thread、address-space-与-process}
 
-推论：切换 thread 没有神秘操作，就是把当前寄存器组**存**进内存、把另一个 thread 的存档**读**回寄存器。这就是 lec01 说的 context switch 的精确含义。
+**核心问题：怎样分别描述执行进度、内存视图和资源归属？**
 
-### 单线程 vs 多线程进程
+| Concept | 回答的问题 | 关键状态 |
+|---|---|---|
+| Thread | 执行到哪里，怎样继续？ | PC、registers、stack |
+| Address space | 哪些地址可访问？ | 地址映射、内容与权限 |
+| Process | 哪些执行流和资源属于同一个运行环境？ | Address space、threads、资源 |
 
-![Single vs multithreaded process](../assets/lec02/page20.png)
+用同一个例子区分它们：
 
-* 单线程进程：`code / data / files` 一份，配 `registers + stack` 一套，只有一条执行流。
-* 多线程进程：`code / data / files` 仍是**一份**（所有线程共享），但 `registers` 和 `stack` 变成**多套**，多条执行流在同一个进程里并行穿梭。
-* 所以每个线程独享的只有两样：**寄存器现场**和**栈**。堆、全局变量、打开的文件全部共享。这正是多线程编程里 data race 问题的根源（Synchronization 章节的主战场）。
+1. 磁盘上存着一个编辑器程序，这是 **program**，尚不等于正在运行。
+2. 启动它后，OS 为这次运行建立 **process（进程）**，管理它的内存和资源。
+3. 其中一条 **thread（线程）** 正在处理键盘输入；另一条可以负责后台读取文件。
+4. 两条线程都在这个进程的 **address space（地址空间）** 中访问代码和数据。
 
-两个官方定位：**Threads encapsulate concurrency（active component）；Address spaces encapsulate protection（passive component）**。
+**Process 说明“属于哪个运行环境”，thread 说明“哪条执行流正在做到哪一步”。** CPU 则是真正执行这些指令的硬件。
 
-一个进程里为什么要多个线程？**Parallelism**（利用多核真并行）+ **Concurrency**（更方便地处理 I/O 等同时发生的事件）。
+### Thread：执行现场 {#thread-·-执行上下文}
 
-> 💡 **Concurrency ≠ Parallelism**（课堂上当场考过的辨析）：
->
-> * **Concurrency**：同时*处理*多件事，是一种结构能力，和硬件有几个核无关。
-> * **Parallelism**：同时*执行*多件事，必须有多个核。
->
-> 自测：单核机器上跑两个线程，是 concurrency 还是 parallelism？答案：**concurrency**。两个线程在交替推进，但没有任何两条指令真正同时执行。
+**核心问题：计算到一半被暂停，恢复时需要什么？**
 
-***
+**A thread is an execution context.** 核心状态包含 PC、registers、SP 及相关 execution flags，并关联它的调用栈。只有保存“继续执行需要的状态”，才能恢复原来的计算。
 
-## 5. Concept 2: Address Space（内存视图）
+| Situation | Register state | Stack / other memory |
+|---|---|---|
+| Running | 当前使用 CPU registers | 位于内存中，按需访问 |
+| Not running | 恢复所需状态保存于内存 | 通常仍存在，不会整体搬进 CPU |
 
-**定义**：the set of accessible addresses + 与之关联的状态。32 位机有 2³² ≈ 4 billion 个地址，64 位机有 2⁶⁴ 个。
+“驻留在 CPU”与“现场已保存”是简化观察角度。完整调度还要区分 ready、running、blocked，见 Lecture 3。保存现场不是复制整个 address space。
 
-对一个地址读/写时，不止"读写内存"一种结果：
+**只有一套硬件寄存器，怎么记住两个线程的进度？**
 
-* 普通内存访问
-* 写入被忽略（只读区域）
-* 触发一次 I/O 操作（**Memory-mapped I/O**：设备寄存器被映射成内存地址）
-* 触发异常 **fault**（访问了无权限地址，即 Segmentation Fault）
+- A 运行时，硬件寄存器中放 A 的当前值。
+- 暂停 A 时，把恢复所需的值保存到内存中的管理记录，再装入 B 的值。
+- 此时寄存器用于 B，但 A 的代码、数据和栈仍留在内存中；保存的现场记录着怎样继续使用它们。
+- 轮到 A 时，再恢复 A 的现场。A 继续自己的计算，而不是从第一行重新运行。
 
-### 四段布局
+因此，两份 **register state（寄存器状态）** 不等于两套物理寄存器。前者可以作为数据保存在内存中，后者才是 CPU 内的硬件。
 
-::: tip 基础补充
-对内存里的 stack 和 heap 本身不熟？先读 [Stack vs Heap 补充篇](../foundations/stack-vs-heap.md)，再回来会顺很多。
-:::
+![Single and multiple threads](../assets/lec02/page20.png)
+
+同一 process 的 threads 共享 code、global objects、heap 和 process-level resources，各自有执行现场、stack，以及 thread-local state。多个线程可能交替运行，也可能在多核上并行。
+
+**同一个进程，为什么能有多个执行位置？**
+
+- Code 可以只有一份，Thread A 的 PC 指向函数 f，Thread B 的 PC 指向函数 g；也可以都执行 f 的不同位置。
+- 每个 thread 保存自己的 registers 和调用链，因此暂停 A 不会把 B 的执行进度当作 A 的进度。
+- Shared objects 仍只有共同的一份，所以一个 thread 的写入可能影响另一个 thread 的读取。
+
+> 💡 “每线程独立栈”描述调用状态的归属，不是硬件隔离。一个有效指针可以让同进程的另一个线程访问该栈中的对象；对象必须仍存活，冲突访问必须同步。
+
+### Address space：内存视图 {#address-space-·-内存视图}
+
+**核心问题：程序看到的地址怎样对应到实际存储？**
+
+**An address space is a set of addresses and their associated state.**
+
+地址可以理解为程序用来找到数据的编号，但必须同时知道这个编号属于哪个进程：
+
+```text
+进程 A 使用地址 0x20 → A 自己的某个对象
+进程 B 使用地址 0x20 → B 自己的某个对象
+```
+
+- 程序使用的编号叫 **virtual address（虚拟地址，VA）**。
+- 实际内存中的位置用 **physical address（物理地址，PA）** 表示。
+- **Address translation（地址翻译）** 把前者对应到后者。
+- 一个地址能否访问，还要看是否有对应的存储以及读、写等权限。地址存在于编号范围内，不等于一定可以使用。
+
+| Access | Possible result |
+|---|---|
+| Mapped ordinary memory with permission | 读取或写入数据 |
+| Read-only mapping written by user code | 通常产生 protection fault |
+| Unmapped / invalid address | 产生 fault；由 OS 按原因处理 |
+| Authorized memory-mapped device register | 按设备规则触发 I/O 行为 |
+
+设备寄存器可能忽略某些写入；不能把“只读内存通常静默忽略写入”当成保护规则。Fault 也不一律导致终止，例如 demand paging 可以处理某些 fault 后继续执行。
+
+**把内存区域和代码中的对象对应起来**
 
 ![Address space layout](../assets/lec02/page17.png)
 
-从 `0x000…` 往上依次是 **code segment → static data → heap**，中间留空，最顶部 `0xFFF…` 附近是 **stack**。heap 向上长，stack 向下长。左侧寄存器里，**PC** 指向 code segment 中正在执行的 `instruction`，**SP** 指向 stack 顶部。
+| Region | Typical contents | Lifetime / purpose |
+|---|---|---|
+| Code | Machine instructions | 可执行映射，通常不允许普通写入 |
+| Static data | Global and static objects | 整个程序执行期间 |
+| Heap | Dynamically allocated objects | 从成功分配到释放 |
+| Stack | Call-related state | 随调用活动变化 |
 
-四段分别装什么：
+图中的 heap 向上、stack 向下是便于理解的布局模型，不是 C 对实际地址的保证。多线程有多个栈，分配器也可能使用多个映射区域。
 
-| Segment | 里面是什么 | 怎么分配 | 大小 |
-|---|---|---|---|
-| code | 编译后的机器指令 | 加载时从可执行文件读入 | 固定 |
-| static data | 全局变量、静态变量 | 加载时从可执行文件读入 | 固定 |
-| heap | `malloc` 出来的动态内存 | 程序员手动申请/释放 | 运行时变化，向上长 |
-| stack | 函数的局部变量、返回地址、调用帧 | 函数调用自动压栈/弹栈 | 运行时变化，向下长 |
+**Static data 的 static 不是“值不能变”。** `global = 11` 可以改变一个可写全局变量的值；它仍属于静态存储，因为其生命周期不随某次函数调用结束。不要把 static data 与 read-only 混为一谈。
 
-**为什么非要分四段，而不是一整块？** 这是课堂上展开最久的一段论证：
+**为什么不把所有东西混在一起，而要分成这些区域？**
 
-* **code 和 static data 的大小在编译/加载前就能确定**（全局变量不可能在运行时新增），所以一次性 provision 好，放在底部不再动。
-* **stack 和 heap 的大小无法预知**：函数调用链有多深、`malloc` 会要多少（比如变长数据），运行前都不知道。硬给固定大小，不是浪费就是不够。
-* 背后的设计原则：**minimize movement**。移动数据消耗指令、消耗时间，所以布局让两段"不确定"的内存相向生长、共享中间同一块余量，谁也不挤谁，谁也不用搬家。
+先问：程序运行前，哪些空间需求已经知道，哪些要运行时才知道？
 
-### 用代码对号入座
+1. **指令与静态对象**：对于已经加载的程序，可以知道代码和静态对象需要多少空间，适合先安排位置。
+2. **函数调用**：例如输入决定递归次数，运行前不一定知道会同时存在多少层调用。每深入一层就需要保留新的调用状态，返回时则按相反顺序撤销，所以用 stack。
+3. **动态对象**：例如读到文件后才知道需要多大的数组；它也可能在创建它的函数返回后继续使用，不能跟着那次调用一起撤销，所以单独用 heap 管理。
 
-![Which variable lives in which segment](../assets/lec02/page18.png)
+**那为什么示意图让 heap 和 stack 相向增长？** 假设中间有一块尚未使用的空间：
 
-* `int global_var = 10;`（函数外的全局变量）→ **Data segment**
-* `stack_var_in_func` 和 `main` 里的 `stack_var`（函数内的局部变量）→ **Stack segment**
-* `malloc(sizeof(int))` 返回的那块内存 → **Heap**
+- 如果提前一半给 stack、一半给 heap，可能出现 stack 用完了，但 heap 那边还空着很多的情况。
+- 从两端向中间增长，可以让当前需要空间的一边使用余量，少一些提前切分的浪费。
+- 同时尽量让已有内容留在原位，减少为了腾空间而搬移数据的工作。这就是这里的 **minimize movement** 思路。
 
-注意代码里的注释：`The programmer is responsible for freeing heap memory.` 栈变量随函数返回自动消失，堆内存不 `free` 就泄漏。这是 C 和带 GC 的语言最大的区别之一。
+> 💡 先理解“不同用途与生命周期，需要不同管理方式”。相向增长是解释这一思路的简化布局；真实多线程栈和分配器不必只有这两块连续区域。动态大小也不一定要求 heap，判断时还要看对象需要存活多久。
 
-**本机实测**（`demos/lec02/segments.c`，四类地址各打印一个）：
+![Pointer object and allocated object](../assets/lec02/page18.png)
 
+```c
+int global = 10;
+void example(void) {
+    int local = 20;
+    int *p = malloc(sizeof *p);
+    if (p == NULL) return;
+    *p = 30;
+    free(p);
+}
 ```
-code   (main):    0x1000a44f8     ← 最低
-data   (global):  0x1000ac000
-heap   (malloc):  0x100945a80
-stack  (local):   0x16fd5a648     ← 远远最高
+
+这里省略头文件。逐个看这四个对象，尤其不要把 p 和它指向的对象合成一个：
+
+| 代码 | 创建或修改了什么？ | 这里按什么区域理解？ |
+|---|---|---|
+| `int global = 10` | 一个全局 int，存 10 | Static data |
+| `int local = 20` | 这次函数调用的局部 int，存 20 | Stack |
+| `int *p = malloc(...)` | p 保存新分配对象的地址 | p 是局部变量；新对象在 heap |
+| `*p = 30` | 沿 p 中的地址找到那个 int，写入 30 | 修改 heap 对象，不是把 p 改成 30 |
+| `free(p)` | 释放先前申请的对象 | 此后不能再通过 p 读写那个对象 |
+
+**函数返回时，局部变量 p 的生命周期结束，但这并不自动释放 malloc 申请的对象。** 因此示例在返回前明确调用 free。这里按常见布局理解局部变量；编译器也可能把它保存在寄存器中。
+
+::: tip 基础补充
+对对象和地址不熟，先读 [C Pointers](../foundations/c-pointers.md)；对生命周期不熟，先读 [Stack vs Heap](../foundations/stack-vs-heap.md)。
+:::
+
+### Process：运行环境 {#process-·-运行环境}
+
+**核心问题：为什么“一个程序”不够描述运行状态？**
+
+**A process is an execution environment with an address space, one or more threads, and resources under restricted rights.** Program 是静态文件，process 是实例。同一 executable 可产生多个 process；界面窗口数量与 process 数量没有固定对应关系。
+
+![Multiple processes](../assets/lec02/page21.png)
+
+不同 process 可以有独立的代码、数据、heap、stack 视图。默认私有存储的隔离不排除有意共享：OS 可以提供 shared memory、pipes、sockets 等通信机制。
+
+Multiprogramming 表示多个程序的工作在系统中共同推进，不限定只能单核。Concurrency 表示任务的执行在时间上交叠；parallelism 表示同一时刻真的执行多个任务。接下来的单核模型只讨论一个 hardware execution context。
+
+![Time multiplexing](../assets/lec02/page22.png)
+
+单核上的时间线可以是：
+
+```text
+时间 →    A 运行    B 运行    A 继续    C 运行
+同一个 CPU   A   →    B   →     A   →    C
 ```
 
-四类地址的相对高低和布局图完全吻合：code 垫底，stack 站在高地址顶端。
+- 切走 A：保存它的 PC、SP 和寄存器值。
+- 换上 B：把 B 先前保存的状态恢复到 CPU。
+- 再回到 A：继续暂停前的工作，不是从头再执行。
 
-一个学习建议：以后写程序的时候，可以习惯性地想"这个变量此刻住在地址空间的哪一段"。
+触发切换的原因可能是计时器到期、线程主动让出 CPU，或当前工作需要等待 I/O。这里先按一个 CPU 执行位置理解。
 
-***
+**但是，只会轮流执行，还不等于有保护。**
 
-## 6. Concept 3: Process（受限的运行环境）
+1. 假如 A、B 能任意读写同一片内存，A 即使只占很短的 CPU 时间，也能把 B 的数据改坏。
+2. 因而，CPU 的分时解决“谁在执行”，地址空间的保护解决“它能访问什么”。
+3. 同一进程的线程选择共享，便于合作；不同进程则默认隔离私有内存。
+4. 跨进程切换时，除了执行状态，还要换上目标进程的地址翻译环境。
 
-**定义**：execution environment for a program **with restricted rights**。组成 = address space + 一个或多个 thread + 进程拥有的资源（file descriptors、文件系统上下文等）。
+**线程是执行单位，地址空间是保护边界的一部分。这两个问题要分别解决。**
 
-**Program ≠ Process**：program 是磁盘上静态的可执行文件，process 是它运行起来的实例。同一个程序可以同时有多个进程：双击两次 PowerPoint 开出两个窗口，程序相同、进程不同，各自有独立的 address space 和现场。
+## 4. 保护机制 {#_4-protection-·-地址与权限如何配合}
 
-为什么要发明 process 这个概念？一个词的答案：**protection**。
+**核心问题：OS 如何在用户代码直接运行时落实访问限制？**
 
-* 进程互相保护（一个程序崩了不该带走其他程序）
-* OS 保护自己不被进程伤害
-* 代价：**protection 和 efficiency 天生矛盾**。同进程内通信很容易（共享内存直接读写），跨进程通信必须走 OS 提供的 pipe/socket 等机制。
+### Dual mode：权限 {#dual-mode-与地址检查}
 
-![Multiprogramming: multiple processes](../assets/lec02/page21.png)
-
-**Multiprogramming**（多道程序设计）的画面：左边 P1、P2 … Pn 坐在 OS 之上；右边的物理内存里，每个进程各自占一套完整的四段布局（code / static data / heap / stack，各自的颜色互不重叠）。多个进程同时在内存里"备场"，CPU 在它们之间切换，这就是下一节"单核变出多个处理器"的布景。
-
-### 单核如何变出多个处理器
-
-![Illusion of multiple processors](../assets/lec02/page22.png)
-
-答案：**multiplex in time**（时间上复用）。
-
-* 每个 vCPU 对应一个 **state block**，保存 PC、SP、registers（就是第 4 节的 thread context）。
-* 真实的 CPU core 按 `vCPU1 → vCPU2 → vCPU3 → vCPU1 …` 轮流服务，每个 vCPU 占一小段时间片。
-* 切换动作只有两步：**save** 当前的 PC/SP/registers 到 state block，**load** 下一个 state block 的值进寄存器。
-* 触发切换的三类事件：**timer**（抢占）、**voluntary yield**（程序主动让出）、**I/O**（程序等磁盘/网络时让出）。
-
-注意一个不对称：**CPU 只能在时间上复用**（一个核同一时刻只能跑一个线程），而**内存和 I/O 可以在空间上切分**（你一块我一块）。所以 CPU 调度问题永远是"下一个把时间片给谁"。
-
-**历史教训**：如果所有 vCPU 共享内存且没有保护，每个线程都能读写其他线程的数据。这种无保护模型真实存在过：embedded 系统、Windows 3.1/早期 Mac（只有 yield 切换）、Windows 95–ME（yield + timer）。它们的稳定性口碑说明 protection 不能省。
-
-### OS 视角：PCB 与调度器循环
-
-**PCB（Process Control Block）**：内核眼中一个进程的完整档案，装着 PID、process state、PC、寄存器现场、memory limits、打开的文件等。前面说 context switch 时"把现场存进内存"，存的地方就是 PCB。调度器手里维护着所有进程的 PCB，用它来决定下一个上 CPU 的是谁。
-
-**调度器主循环**：OS 的主体其实是一个 infinite loop，每轮只问一个问题："现在有没有 ready 的 PCB？"
-
-* 有：按 policy 挑一个，把它的现场 load 进寄存器，RTU 交给它跑。
-* 没有：跑 **idle process**（系统自带的兜底进程，空转消耗几条指令，再回调度器）。
-
-"怎么决定下一个跑谁"这个 policy 问题先悬着，它是后面调度章节的主题。
-
-***
-
-## 7. Protection: OS 到底在防什么
-
-按动机分类：
-
-| 动机 | 含义 |
-|---|---|
-| **Reliability** | bug 只能搞坏自己进程的内存；OS 被攻破通常等于整机崩溃 |
-| **Security** | 恶意进程不能读/写其他进程的数据 |
-| **Privacy** | 每个进程只能访问被授权的数据 |
-| **Fairness** | 每个进程只能拿自己那份 CPU/内存/I/O |
-
-实现手段分两层：
-
-* **Primary mechanism**：限制"程序地址空间 → 物理内存"的翻译。进程只能碰映射进自己地址空间的东西。
-* **Additional mechanisms**：privileged instructions、I/O 指令和特殊寄存器的访问控制、syscall 检查、文件权限等。
-
-![Protection: blocked accesses](../assets/lec02/page27.png)
-
-每个 Process 框里有 `Threads / Address Spaces / Files / Sockets` 四样资源。红色箭头从 Process 2 出发，指向**别的进程的内存、OS 自己的内存和 Storage**：这些全是被禁止的访问，进程不许绕过 OS 直接碰。注意 Processor 旁边的 `PgTbl & TLB`：地址翻译硬件（页表 + TLB 缓存）守在内存访问的必经之路上。
+**核心问题：OS 把 CPU 交出去后，程序为什么不能改掉限制？**
 
 ![Protection boundary](../assets/lec02/page29.png)
 
-红色弧线是 **Protection Boundary**，把三个 Process 和下方的 OS Memory、硬件（Storage、Networks、Displays、Inputs）隔开。它们其实跑在同一块硬件上，隔离完全是 OS + 硬件机制实现的。这张图值得印在脑子里：**OS 在下、进程在上，共享同一套硬件但彼此隔离**，这就是计算机实际的样子。
+OS 决定哪些映射与操作被授权，hardware 在执行中落实检查。普通 memory access 不需要每次调用一个 kernel 函数来审批；地址翻译硬件利用内核建立的状态检查权限。
 
-***
+![Unauthorized accesses across protection boundaries](../assets/lec02/page27.png)
 
-## 8. Concept 4: Dual-mode operation（两态运行）
+三类访问要分开判断：
 
-核心问题：OS 把 CPU 交给用户程序之后，凭什么还能拿回来？
+- **其他 process 的私有 memory**：没有授权映射时，不得直接读取或写入。
+- **OS memory**：不能让应用改写内核代码、映射与管理数据，否则保护规则本身会被破坏。
+- **Storage / devices**：经受控接口和权限规则访问，而非任意绕过管理层操作硬件。
 
-如果用户程序和 OS 权限相同，答案是拿不回来：程序获得控制权后可以永远握着不放（stay there forever, hold privilege forever）。所以硬件必须分出两种权限级别：
+目的也不同：reliability 限制 bug 的破坏范围；security / privacy 阻止未授权访问；fairness 约束资源分配。它们不是同一个指标。
 
-* **Kernel mode**（supervisor mode）：什么都能干
-* **User mode**：一批操作被禁止，例如**修改页表指针、关中断、直接操作硬件、写内核内存**
+**Dual-mode operation** distinguishes user mode from kernel mode.
 
-mode bit 存在 CPU 的特殊寄存器里，每条指令执行时硬件都在查它。用户态程序执行禁令操作，硬件直接拒绝并触发异常。
-
-### 模式切换全景图
-
-![User/Kernel mode transitions](../assets/lec02/page32.png)
-
-* 蓝色大半圆 = **User Mode**（Limited HW access），红色内圆 = **Kernel Mode**（Full HW access）。内核权限是用户权限的超集。底部红色砖墙是硬件边界。
-* 进入内核的三个箭头：
-  * `syscall`：程序**主动**请求系统服务
-  * `interrupt`：外部异步事件（timer、I/O 设备）**被动**打断
-  * `exception`：程序自己出事（除零、非法地址）**被动**陷入
-* 返回用户的两个箭头：`rtn`（return from syscall）、`rfi`（return from interrupt）。
-* `exec`：在内核里加载新程序，之后以用户态跑起来。`exit`：进程结束，**只进不出**，没有返回箭头。
-
-### 三种 user → kernel 转移的区分
-
-| 类型 | 触发方 | 同步/异步 | 例子 |
-|---|---|---|---|
-| **Syscall** | 进程主动请求服务 | 同步 | `exit`、读写文件 |
-| **Interrupt** | 外部硬件事件 | 异步（和进程在干嘛无关） | timer、I/O 设备完成、键盘鼠标输入 |
-| **Trap / Exception** | 进程内部出错 | 同步（由当前指令直接引起） | segmentation fault、除零 |
-
-你写的第一行代码 `printf("hello")` 其实也是一次 syscall：输出字符要用 I/O 资源，必须进内核。用户态程序连"往屏幕上打印"都做不到，这是 dual mode 最日常的体感。
-
-Syscall 有个精妙之处：它**像函数调用，但进程手里没有内核函数的地址**。调用方只能把 **syscall id 和参数放进寄存器**（marshal），执行 `syscall` 指令，剩下的由硬件和内核接手。课件把它类比成 RPC（远程过程调用），分布式章节会回收这个伏笔。
-
-三种转移合称 **unprogrammed control transfer**：跳转目标**不是**由正在运行的程序指定的。程序没法喊"跳转到内核任意地址"，否则它早晚会找到办法摸进内核，保护形同虚设。
-
-### 跳转地址从哪来：interrupt vector
-
-![Interrupt vector](../assets/lec02/page43.png)
-
-* **Interrupt vector** 是内存里的一张表，每个表项存着某个 handler 的**地址和属性**（如 `intrpHandler_i ()`）。
-* 事件发生时，硬件拿到 **interrupt number (i)**，用它作下标查表，取出 handler 地址，切到 kernel mode 跳过去。
-* 安全闭环：这张表由 **OS 在启动时填写**，放在内核保护区，用户程序改不了。程序只能选择"触发几号事件"，不能选择"跳到哪去"，决定权永远在 OS 手里。
-* 一个值得知道的细节：interrupt vector 是用户进程唯一能"够到"的内核地址，但硬件在跳转的同一瞬间就把模式切成 kernel mode，进程借这一步也摸不到内核的其他地方。
-
-***
-
-## 9. Base & Bound: 最朴素的内存保护方案
-
-理解了 dual mode，来看早期 OS 怎么用它做内存保护。思想极简：给每个进程划一段连续物理内存，用两个寄存器看住它。
-
-在具体方案之前，先看这张抽象模型，它是整个内存保护章节的骨架：
-
-![Address space translation](../assets/lec02/page35.png)
-
-**Processor 和 Memory 之间夹了一个 Translator**。CPU 发出的每个地址都是 "virtual address"，经 Translator 变成 "physical address" 后才真正碰到内存。程序活在和物理内存**不同**的地址空间里，Translator 守在访存的必经之路上：想访问哪、能不能访问，都要先过它这关。Base & Bound 就是这个 Translator 最朴素的实现。
-
-### 9.1 版本 A：加载时翻译（static relocation）
-
-![Base & bound, translate at load time](../assets/lec02/page34.png)
-
-* 左侧黄色块是**程序视角**的地址空间：从 `0000…` 到 `0100…`，code → static data → heap → stack。注意这张图里地址顺着页面**往下**增大（和第 5 节的布局图方向相反），所以 heap 箭头朝下、stack 箭头朝上，但语义没变：heap 向高地址长，stack 向低地址长。
-* 右侧蓝色大条是**物理内存**：`0000…` 处已有另一个程序（灰色），我们的程序装在 `1000…` 到 `1100…`。
-* **Base = 1000…，Bound = 1100…**，都是物理地址。
-* 加载器（**relocating loader**）在装程序时把代码里的地址**一次性改写**好（`0010` → `1010`）。运行时 CPU 只做两个比较：地址 `>= Base` 且 `< Bound`，越界就 fault。
-* 优点：仍然保护 OS、仍然隔离程序，且 **no addition on address path**（运行时不用做加法，快）。
-* 缺点：程序一旦加载就**动不了**（地址已写死），还需要专门的 relocating loader，改写本身也容易出错（kind of risky, might not always work）。
-
-### 9.2 版本 B：运行时翻译（dynamic relocation）
-
-![Base & bound, translate on the fly](../assets/lec02/page36.png)
-
-与版本 A 的两处关键差异：
-
-* 程序地址**不改写**，每次访问经过硬件加法器：physical = program address + Base。图中 `0010… + 1000… = 1010…`。
-* **Bound 变成了长度**（`0100…` 而非 `1100…`）：比较发生在加 Base **之前**，查的是偏移量 `0010 < 0100` 是否成立。
-* 好处：程序运行中也能被 OS **搬家**（改一下 Base 即可），内存管理灵活得多。
-* 代价：**每一次访存都要多过一次加法器**，给程序执行 adds latency。灵活性是用这一点延迟换来的。
-* 两个自测问题：程序能碰到 OS 吗？能碰到其他程序吗？都不能。它的地址恒等于"自己的偏移 + Base"，偏移又被 Bound 卡住，永远落在 `[1000, 1100)` 区间里。
-
-### 9.3 完整流程：OS 加载并启动一个进程
-
-下面三张图把本讲所有概念串成一条时间线。
-
-**第 0 步：开机**。上电瞬间，PC 指向 OS 代码的入口，寄存器指向 OS 自己的栈，base/bound 覆盖整个地址空间。OS 先"热身"，初始化所有硬件资源，然后才轮到第一个用户进程登场。
-
-**第 1 步：OS load process**
-
-![OS loads the process](../assets/lec02/page37.png)
-
-* 内存里：OS 占 `0000…` 起的灰色区，P1（绿）装在 `1000…`–`1100…`，P2（黄）装在 `3000…`–`3080…`。
-* 中间是 CPU 的特殊寄存器组：
-  * `sysmod = 1`：**system mode 位**，1 表示当前在内核态。
-  * `Base / Bound / uPC = xxxx…`：尚未填写，OS 马上要填。
-  * `PC / regs`：当前装着**内核自己**正在执行的现场。
-  * `uPC`（user PC）：一个**保存槽**，存"等下用户程序该从哪条指令开始跑"。
-
-**第 2 步：OS gets ready**
-
-![OS sets registers, then RTU](../assets/lec02/page38.png)
-
-* OS 用 **privileged instruction**（特权指令，用户态禁用）填好：`Base = 1000…`、`Bound = 1100…`（P1 的地盘）、`uPC = 0000…`（P1 从自己视角的 0 地址开始）、`regs = 00FF…`（P1 的初始寄存器值）。
-* PC 处的红框 **RTU**（Return To Usermode）是 OS 执行的最后一条内核指令，它做两件事：`sysmod` 翻成 0，`PC ← uPC`。
-* 设置 Base/Bound 是"改写保护边界"的操作，只有内核能干，这就是特权指令存在的意义。
-
-**第 3 步：user code running**
-
-![User code running in user mode](../assets/lec02/page39.png)
-
-* `sysmod = 0`：现在是**用户态**。`PC = 0000…`：从 P1 视角的 0 地址开始跑（物理上落在 Base + 0 处）。
-* P1 运行期间的每次内存访问，都被 Base/Bound 自动看守。
-* 最后一个问题：**kernel 怎么夺回控制权？** 答案就是第 8 节的三种转移：程序主动 syscall、timer interrupt 把它打断、或者它自己犯错 exception。无论哪种，CPU 都经 interrupt vector 跳进内核，`sysmod` 翻回 1，调度器再决定下一个 RTU 给谁。这个"进内核先存寄存器、回用户先恢复寄存器"的循环，在你的电脑里每秒发生成千上万次。
-
-***
-
-## 10. Summary
-
-| 概念 | 组成 | 一句话 |
+| Mode | 可以做什么 | 关键限制 |
 |---|---|---|
-| Thread | PC + registers + stack + flags | 程序"跑到哪了"的完整快照；切换 = 存/取这个快照 |
-| Address space | 可访问地址集合 + 内容 | code/data/heap 在低地址向上，stack 在高地址向下；可与物理内存不同（virtual） |
-| Process | address space + ≥1 thread + 受限权限 | 保护容器：进程间难通信是特性不是缺陷 |
-| PCB | PID + state + PC + registers + memory limits + open files | 内核眼中的进程档案；调度器拿着所有 PCB 做决策 |
-| Dual mode | user / kernel + mode bit | 禁令操作只能在内核态做；三个受控入口：syscall / interrupt / exception，跳转目标由 OS 的 interrupt vector 决定 |
+| User mode | 普通计算、合法内存访问 | 不能任意修改保护寄存器、内核映射、关键设备状态 |
+| Kernel mode | 执行资源管理所需的特权操作 | 按具体 architecture 的规则运行 |
 
-***
+> 💡 **检查访问范围，和保护检查规则，是两件相配合的事。** Base / Limit 限制程序能访问哪里；user / kernel mode 则防止程序自己改掉 Base / Limit。如果用户代码能改范围，检查就失去意义。
 
-## 11. Self-check
+同样，不能让用户随意关闭用于抢占的时钟中断，否则它就可能一直占着 CPU，OS 无法按原定机制取回控制。
 
-1. Thread、address space、process 三者的定义和包含关系是什么？同一个进程里的多个线程，哪些资源独享、哪些共享？
-2. 地址空间四段（code / static data / heap / stack）各放什么？增长方向？`int g;`、函数里的 `int x;`、`malloc` 返回的内存、函数返回地址各在哪一段？
-3. 单核上如何变出多个 vCPU 的假象？一次切换具体 save/load 什么？哪三类事件能触发切换？
-4. Concurrency 和 parallelism 的区别？单核机器上跑两个线程，算哪一种？
-5. PCB 里存什么？调度器的主循环在做什么？idle process 是干嘛的？
-6. 三种 user → kernel 转移分别是什么、各举一个例？为什么叫 unprogrammed control transfer？interrupt vector 如何保证跳转目标是安全的？
-7. 运行时翻译版 B&B 中，Base = 1000、Bound = 0100（长度）。程序访问 `00F0` 时物理地址是多少？访问 `0200` 会发生什么？为什么用户程序不能直接改 Base 寄存器来越狱？
+### 地址翻译
 
-<br />
+**核心问题：最简单的地址检查和重定位如何工作？**
 
-**A1.** Thread 是执行上下文（PC、registers、stack、flags），回答"跑到哪了"。Address space 是可访问的内存地址集合及内容。Process = address space + 至少一个 thread + 受限权限，是运行容器。同进程多线程**独享**的只有各自的寄存器现场和栈；code、static data、heap、打开的文件全部**共享**（这正是 data race 的温床）。
+![Load-time relocation followed by base-and-bound checks](../assets/lec02/page34.png)
 
-**A2.** code 放机器指令（加载时读入，固定）；static data 放全局/静态变量（加载时读入，固定）；heap 放 `malloc` 的动态内存（手动申请释放，向高地址长）；stack 放局部变量、调用帧和返回地址（函数调用自动压栈弹栈，向低地址长）。对号入座：`int g;` 在 static data，`int x;` 在 stack，`malloc` 的在 heap，返回地址在 stack（调用帧里）。
+左边表示程序原本使用的相对布局，右边是整块物理内存：黄色区域分给这个程序，其他区域不能由它随意访问。
 
-**A3.** 时间复用（multiplex in time）：每个 vCPU 对应一个 state block（PC、SP、registers），CPU 轮流把各 state block 装进真实寄存器运行一小段。切换 = save 当前寄存器组到内存 + load 下一个 state block。触发源：timer interrupt（抢占）、程序主动 yield、程序阻塞等 I/O。
+- 指向右边黄色区域的箭头，是一次实际内存访问。
+- `>=` 检查有没有越过区域的下界，`<` 检查有没有越过上界。
+- 两个检查都通过，才允许访问。**有地址并不意味着有权限。**
 
-**A4.** Concurrency 是同时*处理*多件事的结构能力，parallelism 是同时*执行*多件事、需要多个核。单核上的两个线程是 **concurrency**：它们交替推进，但没有任何两条指令真正同时执行。
+**方案 A：load-time relocation。**
 
-**A5.** PCB 存一个进程的全部档案：PID、状态、PC、寄存器现场、memory limits、打开的文件等。调度器是一个无限循环：每轮查看有没有 ready 的 PCB，有就按 policy 挑一个 load 进寄存器运行，没有就跑 idle process（系统自带的兜底进程，空转几条指令再回调度器）。
+1. Loader 知道程序被放到哪里后，完成所需地址重定位。
+2. 执行时的地址已经处于目标物理区域。
+3. Hardware 仍检查下界与上界，防止越界；只是这条访问路径不再为重定位额外加 Base。
 
-**A6.** Syscall（进程主动求服务，同步，如 `exit`、`printf`）、interrupt（外部硬件异步事件，如 timer、键盘输入）、trap/exception（当前指令引起的同步事件，如除零、segfault）。叫 unprogrammed 是因为**跳转目标不是程序指定的**，程序没有内核函数的地址。Interrupt vector 是 OS 启动时填写、放在内核保护区的表；硬件用 interrupt number 查表取 handler 地址。程序只能选"几号事件"，选不了"跳到哪"，所以安全。
+Static protection 可以直接检查程序使用的地址是否处于物理区间：
 
-**A7.** `00F0 + 1000 = 10F0`，且 `00F0 < 0100` 合法，访问成功。`0200 > Bound(0100)`，硬件比较器拒绝，触发 protection fault（segfault），OS 介入。改 Base 是 privileged instruction，只能在 kernel mode 执行；用户态（sysmod = 0）执行它会被硬件直接拒绝并产生异常。保护边界因此无法从内部突破。
+```text
+Base <= address < Bound
+```
 
-***
+这里 Bound 是结束位置，不包含该端点。若 Base=`0x1000`、Bound=`0x1100`，可访问区间是 `0x1000..0x10ff`。
 
-*Images extracted from the official Lecture 2 slides. Notes rewritten in my own words for review; errors are mine.*
+![Run-time translation: compare virtual address and add base](../assets/lec02/page36.png)
+
+这一次，进入硬件的是程序自己的偏移地址，图中加号负责把它移到实际放置的区域：
+
+- **加号回答“实际在哪里”**：`physical address = Base + virtual address`。
+- **比较器回答“有没有超出自己的范围”**：virtual address 必须小于允许的长度。
+- 这两件事都需要。只有相加而不检查，程序仍可能给出过大的偏移，越过自己的区域。
+
+两图中的 Bound 含义不同：前一图存物理结束位置；这一图存区域长度。下面统一用 Limit 表示后者，避免把数字直接混用。
+
+**方案 B：run-time relocation。**
+
+1. 程序仍使用自己的 virtual addresses，例如从 0 开始的偏移。
+2. 每次访问先验证 VA 的范围，再由 hardware 加 Base 得到 PA。
+3. 程序不需要因为放置位置改变而逐处改写地址；翻译硬件则参与每次地址访问。
+
+| Comparison | Load-time relocation | Run-time relocation |
+|---|---|---|
+| 何时改变地址 | 加载时处理所需引用 | 执行时逐次翻译 |
+| 程序使用的地址视图 | 已重定位到目标范围 | 独立的 virtual view |
+| 需要什么 | Relocating loader + bounds checks | Translation hardware + bounds checks |
+| 主要权衡 | 放置变化需要重新处理重定位 | 更灵活，但地址访问路径增加翻译工作 |
+
+**为什么要比较这两种方案？** 加载时处理地址，把部分工作提前做完；运行时翻译，让程序使用的地址不必随物理放置位置改变。代价是每次访问都经过翻译硬件。这里比较的是灵活性和访问路径上的工作量，两种方案都不能省掉保护检查。
+
+Dynamic relocation 让程序使用从零起的 virtual address，转换过程如下：
+
+```text
+if 0 <= VA < Limit:
+    PA = Base + VA
+else:
+    protection fault
+```
+
+| Base | Limit | VA | Result |
+|---|---|---|---|
+| `0x1000` | `0x100` | `0x20` | PA = `0x1020` |
+| `0x1000` | `0x100` | `0xff` | PA = `0x10ff` |
+| `0x1000` | `0x100` | `0x100` | Fault: upper endpoint excluded |
+| `0x3000` | `0x80` | `0x24` | PA = `0x3024` |
+
+以第一行为例，按“先检查、再相加”做两步：
+
+1. `0x20 < 0x100`：程序申请的偏移没有超出自己的区域，允许访问。
+2. `0x1000 + 0x20 = 0x1020`：到物理内存的这个位置取数据。
+
+第三行为什么失败？长度为 `0x100` 的区域，偏移从 0 开始，最后一个是 `0xff`。`0x100` 已经跨过末尾，不能访问。
+
+以上数字都采用十六进制，前缀 `0x` 用来标明这一点。取指也需要地址翻译，因此程序的 PC 不应直接当成物理地址。
+
+- **谁能设置？** 只有受信任的 kernel 能修改 Base / Limit。
+- **何时更换？** 切换 process 时设置目标进程的地址环境，相同 VA 因而可以指向不同物理区域。
+- **模型边界**：现代通用 OS 主要使用 paging；base-and-bounds 用来理解检查与翻译的基本原理。
+
+### 启动用户程序 {#把保护机制连成一次启动}
+
+**核心问题：设置完映射以后，怎样真正让用户程序开始运行？**
+
+| Stage | CPU mode | PC / SP 与保护状态 |
+|---|---|---|
+| OS 准备环境 | Kernel | 执行内核代码，使用内核所需执行状态 |
+| 准备目标 process | Kernel | 设置目标 Base / Limit、初始 user PC 与 SP |
+| Return to user | 切到 User | 通过受控返回动作开始执行目标用户代码 |
+| 用户程序运行 | User | 普通指令直接执行，内存访问受翻译与权限约束 |
+
+- **设置范围在前**：不能先让用户代码拿到控制，再期待它自己限制可访问地址。
+- **PC 与 SP 都要正确**：PC 决定取哪条指令；SP 决定调用使用哪份栈。
+- **下一问**：用户代码开始后，OS 怎样拿回控制？这就需要 syscall、interrupt 与 exception 的受控入口。
+
+可以用三个“如果忘了”检查是否理解：
+
+- **忘了设置 PC**：CPU 不知道应从用户程序的哪条指令开始。
+- **忘了设置 SP**：即使取对了指令，函数调用也可能使用错误的栈位置。
+- **忘了设置保护状态或降低权限**：用户程序可能越出自己的范围，甚至修改系统的管理规则。
+
+因此启动程序不仅是“把代码放进内存”，还要一起准备执行位置、调用栈和访问权限。
+
+### 进入内核 {#受控入口-syscall、interrupt、exception}
+
+**核心问题：应用需要受限服务时，怎样合法进入 kernel？**
+
+![Mode transitions](../assets/lec02/page32.png)
+
+| Event | Cause | Relation to current instruction |
+|---|---|---|
+| System call | 程序主动请求服务 | Synchronous |
+| Interrupt | Timer 或设备等外部事件 | Asynchronous |
+| Exception | 当前指令引发的特殊条件 | Synchronous |
+
+表中的 synchronous / asynchronous 是相对**当前正在执行的指令**而言：
+
+- 程序执行系统调用指令来请求服务，原因就在当前执行路径上，所以是 synchronous（同步）。
+- 当前指令访问非法地址而触发异常，原因也在这条指令上。
+- 计时器或设备完成事件可以在程序执行不同指令时到来，所以称 asynchronous（异步）。
+
+这里的“同步”不是第四讲的“用锁协调共享数据”。Trap 的具体含义因 CPU 架构而异，有时泛指进入处理程序的事件。
+
+以请求读取文件为例，系统调用可以按以下过程理解：
+
+1. 程序准备**服务编号和参数**，例如读哪个文件、放到哪块缓冲区、最多读多少字节。
+2. 按 CPU 的约定执行系统调用指令，硬件切换到受控的内核入口。
+3. 内核根据编号找到相应服务，检查参数与权限，再执行操作。
+4. 服务完成后交回结果，程序继续处理读到的数据或错误。
+
+普通函数调用只决定跳到哪里执行，不会赋予内核权限。**即使知道内核代码的地址，也不能通过一次普通 jump 取得特权。**
+
+![Interrupt dispatch concept](../assets/lec02/page43.png)
+
+进入内核后，又怎么知道该执行哪段处理代码？可以先把 **interrupt vector（中断向量）** 理解为一张由 OS 配置的入口表：
+
+1. 发生一种事件，硬件识别它的编号。
+2. 根据编号找到对应的入口信息。
+3. 转去执行相应的 **handler（处理程序）**。
+
+例如编号 i 对应某种设备事件：
+
+```text
+事件编号 i → 第 i 个入口项 → handler 的入口地址 → 执行 handler 代码
+```
+
+入口项是“去哪里处理”的信息，不是把整个 handler 函数塞进一个小格子。表的存放位置和查表方式受硬件规范约束；OS 在初始化时配置可用入口，并保护它不被用户程序任意改写。
+
+**知道表在哪里，能不能自己跳进去取得权限？** 不能。权限改变必须通过硬件认可的受控入口完成，安全性不依赖于把地址藏起来。
+
+不同事件需要不同处理：时钟到期可能涉及调度，设备完成则需要处理 I/O 结果。应用不能随意修改这张入口表，否则就能让硬件带着内核权限执行它指定的代码。真实 CPU 也可能使用专门寄存器等方式配置入口。
+
+以 `printf` 为例：
+
+1. Application 调用 C library function。
+2. Library 可能先把字符存入 user-space buffer。
+3. 刷新 buffer 时，才可能通过 `write` 请求内核输出。
+
+因此，**一次 library call 不必对应一次 syscall**。`malloc` 也可能直接利用已有分配区，不必每次向 kernel 申请。
+
+> 💡 **Mode switch is not necessarily a context switch.** 线程 A 发起系统调用，kernel 完成服务后仍返回 A，这是权限切换；只有选择另一个 thread 继续，才发生线程切换。
+
+## Self-check
+
+1. Thread、address space、process 各解决什么描述问题？
+2. Local pointer p 与 malloc 对象分别何时失效？
+3. Base=`0x4000`、Limit=`0x80`，VA=`0x7f` 和 `0x80` 各怎样处理？
+4. 为什么普通函数调用不能代替 syscall？
+5. Timer interrupt 后返回同一 thread，是否一定发生 context switch？
+
+6. Load-time relocation 与 run-time relocation 分别在什么时候处理地址？为什么还需要 bounds checks？
+
+**A1.** Thread 记录如何继续执行；address space 记录可访问地址及状态；process 将地址空间、threads 和资源组合为受保护的运行环境。
+
+**A2.** Automatic pointer 的生命周期随其作用域执行结束；allocated object 在 free 前继续存在。Pointer 生命周期和 pointee 生命周期独立分析。
+
+**A3.** `0x7f < 0x80`，翻译到 `0x407f`；`0x80` 等于上界，产生 fault，不得先相加再忽略范围检查。
+
+**A4.** 普通 call 不能改变权限。Syscall 由 hardware 和 kernel 建立受控入口并验证请求，知道某个内核地址不代表有执行权限。
+
+**A5.** 不一定。执行进入 kernel 再回到同一个 thread，可以只有 mode transition，没有切换到另一个 thread。
+
+**A6.** 前者在加载时重定位所需引用，后者在执行时由硬件把 VA 翻译为 PA。重定位解决放置位置的问题，bounds checks 解决越界访问的问题；完成重定位不等于自动获得保护。

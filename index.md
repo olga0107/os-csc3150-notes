@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Operating Systems
   text: CSC3150 · Fall 2026
-  tagline: Key slides, runnable demos, self-checks
+  tagline: Understand the mechanisms, trace the code, check the reasoning
 ---
 
 <div class="lec-grid">
@@ -26,7 +26,7 @@ hero:
     <span class="lec-num">03</span>
     <div class="lec-body">
       <span class="lec-title">Threads & Processes</span>
-      <span class="lec-sub">Syscall / interrupt / trap · interrupt vector · PCB & scheduler · pthread · race condition</span>
+      <span class="lec-sub">Context switching · ready / blocked states · pthread lifecycle · stack frames · shared data</span>
     </div>
   </a>
   <a class="lec-card" href="./notes/lec04-process">

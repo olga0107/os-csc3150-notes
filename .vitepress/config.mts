@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   base: '/os-csc3150-notes/',
   title: 'CSC3150 Notes',
-  description: 'Operating Systems lecture notes — CUHK-Shenzhen, Fall 2026',
+  description: 'Operating Systems lecture notes · CUHK-Shenzhen, Fall 2026',
   cleanUrls: true,
   lastUpdated: true,
   srcExclude: ['README.md', 'AGENTS.md', 'demos/**', 'node_modules/**'],
@@ -31,6 +31,7 @@ export default defineConfig({
       {
         text: 'Foundations',
         items: [
+          { text: 'C Pointers & API Parameters', link: '/foundations/c-pointers' },
           { text: 'Stack vs Heap', link: '/foundations/stack-vs-heap' }
         ]
       }
