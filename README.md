@@ -14,6 +14,7 @@ Style: English technical terms and code, with Chinese explanations that break di
 | 2 | Four fundamental concepts: thread, address space, process, dual mode, base & bound protection | [lec02-concepts](notes/lec02-concepts.md) |
 | 3 | Threads & processes: control transfers, interrupt vector, PCB & scheduler, pthread API, race condition | [lec03-thread-process](notes/lec03-thread-process.md) |
 | 4 | Interleaving & race conditions, locks & critical sections, fork / exec / wait / exit, signals, the shell pattern | [lec04-process](notes/lec04-process.md) |
+| 5 | File streams and descriptors, copy loops, buffering, open file descriptions and fork | [lec05-files](notes/lec05-files.md) |
 
 ## Course links
 

@@ -2,7 +2,9 @@
 prev:
   text: 'Lecture 3 · Threads & Processes'
   link: /notes/lec03-thread-process
-next: false
+next:
+  text: 'Lecture 5 · Files & I/O'
+  link: /notes/lec05-files
 ---
 # Lecture 4 · 同步与进程 {#lecture-4-·-shared-data-and-process-lifecycle}
 

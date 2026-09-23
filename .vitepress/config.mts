@@ -25,7 +25,8 @@ export default defineConfig({
           { text: 'Lec 01 · Introduction', link: '/notes/lec01-introduction' },
           { text: 'Lec 02 · Four Concepts', link: '/notes/lec02-concepts' },
           { text: 'Lec 03 · Threads & Processes', link: '/notes/lec03-thread-process' },
-          { text: 'Lec 04 · Process API & Locks', link: '/notes/lec04-process' }
+          { text: 'Lec 04 · Process API & Locks', link: '/notes/lec04-process' },
+          { text: 'Lec 05 · Files & I/O', link: '/notes/lec05-files' }
         ]
       },
       {
@@ -38,7 +39,7 @@ export default defineConfig({
     ],
 
     search: { provider: 'local' },
-    outline: { level: [2, 3], label: 'On this page' },
+    outline: { level: 2, label: '本讲目录' },
 
     docFooter: { prev: 'Previous', next: 'Next' }
   }

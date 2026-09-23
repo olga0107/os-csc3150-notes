@@ -36,4 +36,11 @@ hero:
       <span class="lec-sub">Interleaving · race condition · lock · fork / exec / wait · signals · shell pattern</span>
     </div>
   </a>
+  <a class="lec-card" href="./notes/lec05-files">
+    <span class="lec-num">05</span>
+    <div class="lec-body">
+      <span class="lec-title">Files &amp; I/O</span>
+      <span class="lec-sub">Streams · file descriptors · buffering · offsets · fork and shared open files</span>
+    </div>
+  </a>
 </div>
