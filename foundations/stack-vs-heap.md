@@ -16,13 +16,7 @@ next: false
 
 每次调用要保留一些信息：参数、局部值，以及结束后该回哪里继续。典型实现把这些信息放在 **stack frame（栈帧）** 中。
 
-```text
-main 调用 A，A 再调用 B：
-
-栈顶 → B 的 frame：B 的局部状态，返回 A 的位置
-       A 的 frame：A 的局部状态，返回 main 的位置
-       main 的 frame
-```
+<StudyDiagram id="stack-vs-heap-0" />
 
 1. Main 调用 A：A 的调用状态加入栈中。
 2. A 调用 B：A 暂时停下，它的 frame 留着，再加入 B 的 frame。
@@ -49,11 +43,7 @@ int *make_number(void) {
 
 需要包含 `<stdlib.h>`。这里有两个对象：
 
-```text
-函数执行中：
-局部变量 p [地址] ──────► 分配的 int [42]
-       生命周期较短             生命周期由 free 结束
-```
+<StudyDiagram id="stack-vs-heap-1" />
 
 按时间追踪：
 

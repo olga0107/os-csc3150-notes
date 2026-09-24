@@ -106,10 +106,7 @@ x = y + 1            y = 2
 
 **“创建了节点”为什么仍可能丢失插入？** 要区分节点对象和树中的链接：
 
-```text
-A 写入后：6.left → 节点 3
-B 写入后：6.left → 节点 4      节点 3 不再通过这条链接连在树上
-```
+<StudyDiagram id="lec04-process-1" />
 
 创建节点只得到一块保存值的内存；把它接到树上，靠的是修改父节点中的 pointer。6 只有一个 left 字段，后一次赋值会覆盖前一次。节点 3 未必被释放，但已经不能通过这棵树的链接找到，插入结果就丢了。
 
@@ -226,6 +223,8 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
 `pthread_mutex_lock(&mutex)` 传地址，因为函数要操作同一个 mutex 对象。复制 mutex 到每个 thread 或在使用中随意复制其内部状态都不是正确同步方式。
 
+**互斥不等于完成顺序。** Mutex 保证遵守同一锁协议的 critical sections 同时最多有一个执行者，也可能一个都没有。它不保证 A 一定比 B 先获得锁，不保证线程按创建顺序结束，也不能替代 join。锁的保护范围内，既要考虑读取，也要考虑修改；只给写操作上锁，而让其他线程无同步地读取同一对象，仍然可能出错。
+
 ## 2. 进程 API {#_2-process-lifecycle-·-创建、替换、回收}
 
 **核心问题：Shell 如何运行新程序，同时保留自己并取得结果？**
@@ -277,13 +276,7 @@ if (child < 0) {
 }
 ```
 
-```text
-                          fork()
-                  ↙                  ↘
-          Parent (PID 100)        Child (PID 101)
-          child = 101             child = 0
-          x = 10                  x = 10 → 11
-```
+<StudyDiagram id="lec04-process-6" />
 
 **③ 为什么同一段 if，父子走不同分支？**
 
@@ -374,6 +367,20 @@ pid_t child = fork();
 
 同样，看到 parent 的多行输出聚在一起，也不能断言它连续独占 CPU。两边可能都执行过，只是各自攒着文字，稍后才成批交出。`stdbuf -oL` 指定行缓冲，并非完全关闭缓冲；它也不是所有平台都有的命令。
 
+**连续 fork 怎样数进程？**
+
+```c
+fork();
+fork();
+/* 每个成功到达这里的进程执行一次 */
+```
+
+在两个调用都成功、所有进程都执行第二行、没有提前退出的条件下：第一次把 1 条执行流变成 2 条；第二次这 2 个进程各创建一个 child，所以共有 4 个进程，其中 3 个是新建的。不是整个程序总共只产生两个 child。若某次 fork 失败，或第二次只放在 parent 分支，就不能套用 `2^n`。
+
+**Child 能否知道 parent 是谁？** `getpid()` 取得自身 PID，`getppid()` 取得当前 parent PID。进程隔离依赖地址空间和权限检查，不依赖“把 PID 藏起来”。原 parent 退出后，系统可能重新指定 parent，因此 parent PID 也不是永远不变。[getpid / getppid](https://man7.org/linux/man-pages/man2/getpid.2.html)
+
+**多线程 parent 的边界。** Fork 创建的 child 只保留调用 fork 的那条线程，但会复制地址空间状态。其他线程持有的 mutex 状态可能一并留下，而持有者没有出现在 child 中，因此不能把单线程示例直接套到多线程程序。POSIX 对这种 child 在 exec 前可安全执行的操作还有限制。[fork](https://man7.org/linux/man-pages/man2/fork.2.html)
+
 ### exec：替换程序 {#exec-·-替换当前程序}
 
 **核心问题：为什么 child 调用 exec 成功后，不会再回到原来的下一行？**
@@ -387,11 +394,7 @@ _exit(127);
 
 **把 process 理解为“这一次运行的身份”，把 program 理解为“它正在执行的代码”。Exec 保留前者，换掉后者。**
 
-```text
-Exec 前：Child，PID 101，执行原来的 C 程序
-                         ↓ execv 成功
-Exec 后：仍是 PID 101，开始执行 echo 程序
-```
+<StudyDiagram id="lec04-process-extra-52" />
 
 - 原程序的代码、普通变量和调用栈被新程序替换。
 - 因为旧代码已经被替换，echo 结束后也不会回来执行 `perror`。
@@ -446,11 +449,7 @@ Exec 后：仍是 PID 101，开始执行 echo 程序
 
 **为什么 main 里只写 return，也能结束进程？**
 
-```text
-程序入口 → C 运行时准备环境 → 调用 main
-                               ↓ main 返回
-                         正常退出与清理
-```
+<StudyDiagram id="lec04-process-8" />
 
 Main 是应用代码的主要入口，但不是启动时执行的第一条机器指令。初始 main 返回相当于以该返回值进行正常退出；普通辅助函数 return 只会回到它的调用者。
 
@@ -504,15 +503,7 @@ if (WIFEXITED(status)) {
 
 **如果 shell 自己直接 exec 成 ls 会怎样？** 原 shell 会被替换。Ls 结束后，没有那份旧 shell 代码回来打印下一个提示符。这就是通常先 fork，让 child exec 的原因。
 
-```text
-Shell P                         Child C
-  fork ───────────────────────► returns 0
-  receives C's PID              exec external command
-  waitpid(C)                    command runs
-  blocked                       command exits
-  wait returns ◄─────────────── termination collected
-  next prompt
-```
+<StudyDiagram id="lec04-process-9" />
 
 若 shell 自己直接成功 exec，它就被替换，无法按原代码继续显示提示符。因此先 fork，再让 child exec。
 
@@ -543,6 +534,21 @@ parent after wait: x=10, child exit=0
 ```
 
 这个示例通过代码保证输出顺序：fork 前先刷出提示；子进程换程序前也先刷出提示；父进程等子进程结束后才打印最后一行。其他没有这些安排的 fork 程序，输出顺序可能不同。
+
+### 把返回值放在一起判断
+
+**核心问题：同样看到 0、正数、负数，它们是否表示同一件事？**
+
+| 调用 | 成功时 | 失败时 |
+|---|---|---|
+| `pthread_create` / `pthread_join` | 返回 0 | 返回错误编号，不能统一套用 `errno` 的判断方式 |
+| `fork` | Parent 得到 child PID；child 得到 0 | 返回 -1，没有创建 child |
+| `execv` | 替换 image，不返回旧调用点 | 返回 -1，旧程序仍在运行，应处理失败 |
+| `waitpid(pid, &status, 0)` | 返回被回收的 child PID | 返回 -1，应检查错误原因；被信号打断可需要重试 |
+
+`waitpid` 的返回值和它写入的 `status` 是两份信息：前者回答“等到了谁”，后者回答“它怎样结束”。使用 `WNOHANG` 时，还可能返回 0，表示这次没有可报告的目标状态。
+
+例如 child 调用 `_exit(7)`：parent 先确认 waitpid 成功，再确认 `WIFEXITED(status)`，最后用 `WEXITSTATUS(status)` 得到 7。若 child 被信号终止，应检查 `WIFSIGNALED` 并用 `WTERMSIG` 取得信号编号，不能继续把 status 当普通退出码。
 
 ## 3. 信号 {#_3-signals-·-通知、停止与终止}
 
@@ -675,13 +681,13 @@ caught SIGINT
 3. Wait 取得的是 OS 保存的终止信息，不是 child 的任意一块内存。
 4. 进程当然可以传递复杂结果，但需要另用 pipe、socket、共享内存等通信方式。
 
+Unix 的 fork 与 exec 分开，使 child 能先调整环境和 descriptor，再换成目标程序；线程通常直接从同一地址空间里的函数入口开始，所以 pthread_create 不需要再配一个 exec。其他系统也可以采用不同 API，例如 Windows 的 CreateProcess，把创建进程与指定要运行的程序放在一次接口调用中。应理解这些设计的区别，而不是认为所有 OS 都必须使用 fork。
+
 **可选：runtime-managed concurrency**
 
 Goroutine 是 Go 运行时管理的任务。在任务与 OS threads 之间，再加了一层调度：
 
-```text
-多个 goroutines → Go runtime 分配工作 → OS threads → CPU
-```
+<StudyDiagram id="lec04-process-12" />
 
 运行时决定哪个 goroutine 使用哪条线程，OS 仍决定这些线程何时获得 CPU。它不是“所有任务必定只在一个 OS 线程里”，也不自动消除共享数据的同步需求。
 
@@ -703,6 +709,9 @@ System call interface 像连接众多应用与内核实现的 narrow waist。硬
 6. Shell 的前台命令与后台命令，在等待上有什么不同？
 7. Ctrl-Z 与 SIGSTOP 有什么关系？为什么 handler 不用 printf？
 
+8. 两次无条件且成功的 fork 后共有几个进程？为什么？
+9. Waitpid 的返回值、status 和 WEXITSTATUS 分别是什么？
+
 **A1.** A 可在 y 为 0、2、4 时读取。该结论假设 atomic accesses 和 sequential consistency；真实无同步 C 冲突访问可能构成 data race，行为未定义。
 
 **A2.** 两个操作可能在锁外读到同一个空位置，再先后覆盖。保护范围应覆盖构成一项逻辑更新的 search 与修改，并让所有冲突访问遵守同一协议。
@@ -716,6 +725,10 @@ System call interface 像连接众多应用与内核实现的 narrow waist。硬
 **A6.** 前台通常等待命令结束再提示；后台立即允许继续交互，但仍需要之后回收 child。不能把后台等同于永远不 wait。
 
 **A7.** Ctrl-Z 通常发送 SIGTSTP；SIGSTOP 是不可捕获的停止信号。Printf 不保证 async-signal-safe，可能重入尚未一致的 library 状态。
+
+**A8.** 共有 4 个。第一次得到两个执行流，两个都执行第二次 fork；新建 child 共 3 个。存在失败或条件分支时需要重新逐条追踪。
+
+**A9.** 返回值标识回收的 child；status 编码终止类别和相关信息；只有确认 WIFEXITED 后，WEXITSTATUS 才用于提取正常退出码。
 
 ## 参考资料（可选）
 

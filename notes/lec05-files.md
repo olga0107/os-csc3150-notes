@@ -2,7 +2,9 @@
 prev:
   text: 'Lecture 4 · Process API & Locks'
   link: /notes/lec04-process
-next: false
+next:
+  text: 'Lecture 6 · Sockets & Pipes'
+  link: /notes/lec06-sockets-pipes
 ---
 # Lecture 5 · 文件与 I/O
 
@@ -14,11 +16,7 @@ next: false
 
 **先把整讲连起来：** 假设 `input.txt` 中有 `ABCDEF`，目标是把它复制到 `output.txt`。
 
-```text
-找到 input.txt → 打开 → 读进内存 → 写到 output.txt → 关闭
-                         ↑
-                 一次没读完，就继续读
-```
+<StudyDiagram id="lec05-files-0" />
 
 | 学习顺序 | 要回答的问题 | 对应内容 |
 |---|---|---|
@@ -49,10 +47,7 @@ next: false
 - **Write（写入）**：把程序内存里的字节交给目标；写到哪里、是否覆盖，由打开模式和当前写入位置决定。
 - **I/O（Input/Output）**：输入与输出。这里以程序为参照：文件 → 程序是 input，程序 → 文件是 output。
 
-```text
-input.txt                 程序内存                   output.txt
- A B C D E F   ──read──→   临时存放 A B C   ──write──→   A B C
-```
+<StudyDiagram id="lec05-files-2" />
 
 这次只读了前三个字节。要得到完整副本，还需要继续读 `DEF`，再把它写出。
 
@@ -160,12 +155,7 @@ input.txt                 程序内存                   output.txt
 
 这里的 **stream**（流）可以理解为 C 库管理的一条读写通道：它关联一个目标，记录读写状态，并管理缓冲。程序用 `FILE *` 找到这个管理对象。
 
-```text
-路径 "input.txt" ──fopen──→ 得到 input
-                              │
-                              └─ 后续把 input 交给读取函数
-                                 函数便知道操作哪个 stream
-```
+<StudyDiagram id="lec05-files-4" />
 
 下面这段代码放在 `main` 等函数内执行；`#include <stdio.h>` 放在文件开头，让编译器知道这些标准 I/O 函数和类型的声明。
 
@@ -272,9 +262,7 @@ int second = fgetc(input);
 cat hello.txt | grep 'World!'
 ```
 
-```text
-hello.txt → cat → stdout → pipe → stdin → grep → stdout
-```
+<StudyDiagram id="lec05-files-5" />
 
 1. `cat` 读取文件，将内容写到自己的 stdout。
 2. `|` 让 shell 建立管道，把 cat 的输出连接到 grep 的输入。
@@ -400,10 +388,7 @@ length = fread(buffer, sizeof(char), BUFFER_SIZE, input);
 
 一次 `fread` 有两个不同的结果：
 
-```text
-文件里的字节 ──→ buffer 数组：实际内容
-函数的返回值 ──→ length 变量：实际数量
-```
+<StudyDiagram id="lec05-files-6" />
 
 例如文件只剩 `DEF`，那么 `buffer[0..2]` 被填入 D、E、F，而 `length` 是数字 3。**length 不会变成字符串 DEF。**
 
@@ -468,6 +453,51 @@ read = 452
 
 已验证目标文件与源文件逐字节相同，包括含有 `\0` 和 `0xff` 的 binary 内容。遇到 `length == 0` 时仍需检查 `ferror`，不能把所有零返回都当正常 EOF。
 
+### 用字节追踪返回值
+
+**核心问题：读完了多少数据、返回了多少、是否已经观察到 EOF，是不是同一个问题？**
+
+先看文件中的 6 bytes：`A B C D E \n`。调用 `fgets(buf, 4, fp)` 时，数组容量为 4，但最多接收 3 个输入字符，最后一格留给字符串结束符 `\0`。
+
+| 调用 | 得到的字符串内容 | 原因 |
+|---|---|---|
+| 第一次 | `ABC` | 达到 3 个字符的上限，尚未读到换行 |
+| 第二次 | `DE\n` | 读入换行后停止，换行保留在数组内 |
+| 第三次 | 返回 NULL | 已经没有字符可读；再区分 EOF 与 error |
+
+`\0` 是 C 库补上的字符串结束符，不是从文件多读出的字符。长行可能分成多次 fgets，因此一次调用不一定等于一整行。
+
+再看只含 `ABCDE` 的 5-byte 文件。`fread(buf, 2, 3, fp)` 请求 3 个、每个 2 bytes 的 element：
+
+1. `AB` 是第 1 个完整 element，`CD` 是第 2 个。
+2. 最后只剩 `E`，不足以组成第 3 个完整 element。
+3. 返回值是 **2**，不是 5，也不是 3；读取过程已经到达文件末尾，不能认为没计入完整 element 的那个 byte 一定还留在文件里。
+4. 部分 element 的内容不能作为完整记录使用。复制任意文件时使用 `size=1`，能让返回值直接表示有效 byte 数。[fread](https://man7.org/linux/man-pages/man3/fread.3.html)
+
+**EOF indicator 记录发生过什么，不预测下一次。** 若文件恰好有 6 bytes，第一次请求并成功读到全部 6 bytes，`feof` 仍可能为 0；下一次继续读、发现没有数据时，才设置 EOF indicator。循环应以读取的返回值决定是否继续，而不是写成 `while (!feof(fp))` 后无条件使用 buffer。
+
+`fscanf` 又是另一种语义。例如文件含字符 `12 34`，`fscanf(fp, "%d%d", &a, &b)` 返回 2，表示成功赋值两个字段；a 和 b 得到数值 12、34。Fread 不解析十进制数字，只复制它们的字符编码。
+
+可以运行 `demos/lec05/stream_boundaries.c` 验证这三种接口：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror demos/lec05/stream_boundaries.c -o /tmp/os-stream-boundaries
+/tmp/os-stream-boundaries
+```
+
+本机实际输出：
+
+```text
+fgets 1: ABC, length=3
+fgets 2: DE\n, length=3
+partial: elements=2, position=5, eof=1
+exact: bytes=6, eof=0
+next: bytes=0, eof=1
+formatted: assigned=2, a=12, b=34
+```
+
+其中 `DE\n` 用可见符号表示换行；length=3 表示 D、E、换行共 3 个字符，不包含补上的 NUL。程序使用临时文件，并对读取结果做检查。
+
 ### 移动位置
 
 **核心问题：连续读会自动向后，想再读一遍或跳过一段怎么办？**
@@ -522,13 +552,7 @@ END -1: before=4, char=E, after=5
 
 先用一个假设的成功结果理解：
 
-```text
-open("input.txt", O_RDONLY) 返回 3
-                  ↓
-程序保存 fd = 3
-                  ↓
-以后 read(3, ...) 就是在请求：读取本进程编号 3 对应的打开文件
-```
+<StudyDiagram id="lec05-files-extra-51" />
 
 - 3 不是文件内容、文件大小或读取位置，只是用来查找打开对象的编号。
 - 编号只在当前进程的上下文里解释；另一个进程的 3 可以对应完全不同的文件。
@@ -591,10 +615,7 @@ ssize_t write(int fd, const void *buffer, size_t size);
 
 先看同一个 buffer 在两次调用中的不同角色：
 
-```text
-read:   文件/设备 → buffer       buffer 是输出位置
-write:  buffer → 文件/设备       buffer 是输入数据
-```
+<StudyDiagram id="lec05-files-13" />
 
 例如文件内容为 `ABCDEF`，已成功打开并且尚未读取：
 
@@ -907,12 +928,7 @@ read(fd, buffer2, 100);
 
 这份打开状态叫 **open file description（OFD）**，可以先理解成内核为“一次打开”保存的记录：
 
-```text
-打开记录
-├─ 操作哪个文件？ → foo.txt
-├─ 下次从哪里读？ → offset = 100
-└─ 允许怎样访问？ → 例如只读
-```
+<StudyDiagram id="lec05-files-16" />
 
 `offset` 是从开头算起的字节位置；100 表示下一次从编号 100 的字节开始。它不是 `fd` 的值，也不是数据在内存中的地址。
 
@@ -924,14 +940,7 @@ read(fd, buffer2, 100);
 | File descriptor table | 内核维护，每进程一张 | 编号到打开对象的引用关系 |
 | Open file description（OFD） | 内核 | 当前 offset、访问/状态信息，以及找到实际文件的引用等 |
 
-```text
-用户空间：  FILE *fp → FILE object（可包含 buffered data）
-                           │ 关联 fd = 3
-内核空间：  本进程 fd table[3] ──→ open file description
-                                      ├─ offset
-                                      ├─ status flags
-                                      └─ 文件对象 / inode 等信息
-```
+<StudyDiagram id="lec05-files-17" />
 
 - `fd` 是 **descriptor**，OFD 是 **description**，不要因为只差几个字母就当同一个对象。
 - OFD 表示“一次打开的状态”，不是文件字节内容的完整副本。
@@ -1001,11 +1010,7 @@ read(fd, buffer2, 100);
 2. **下方两张 descriptor tables**：子进程继承父进程的打开 descriptors，父子的编号都可能是 3。
 3. **中间只有一个 OFD**：两条箭头指向同一个打开对象，因此只有一个共享 offset，当前仍是 100。
 
-```text
-父进程 fd = 3 → 父进程 table[3] ─┐
-                                ├→ 同一个 OFD，offset = 100
-子进程 fd = 3 → 子进程 table[3] ─┘
-```
+<StudyDiagram id="lec05-files-18" />
 
 **复制了引用关系，不是深拷贝整个 OFD。** 共享状态位于内核，两个进程都只能通过受控 API 操作它，并没有因此获得直接访问对方用户内存的能力。
 
@@ -1116,6 +1121,24 @@ independent open: ABC, offset=3
 - `fdopen` 成功后，`fclose(fp)` 也会关闭这个 fd，不要再把同一编号当作仍然打开而重复 close。
 - 同一打开对象上随意交替 `fread` 与 `read`、`fseek` 与 `lseek`，会绕过 stream 的缓冲管理。学习示例尽量选择一层；确需混用时必须按接口规则协调。
 
+### 为什么会有两个“当前位置”
+
+**核心问题：程序才取出 2 bytes，内核怎么可能已经读了 6 bytes？**
+
+以内容 `ABCDEF` 为例，假设 C 库这次选择预读全部 6 bytes：
+
+| 时刻 | 应用已经消费 | 用户态输入 buffer 中剩余 | 底层 OFD offset |
+|---|---|---|---|
+| 刚打开 | 无 | 无 | 0 |
+| 第一次 fgetc 返回 A | A | BCDEF | 6 |
+| 第二次 fgetc 返回 B | AB | CDEF | 6 |
+
+应用的 stream 逻辑位置在 B 后面，而底层 fd 已经在第 6 byte 后面。此时绕过 stream 直接 read 底层 fd，不能指望得到 C；C 还在 C 库的 buffer 中。表中的预读量只是解释用的假设，具体库不必一次读 6 bytes。
+
+这也解释了为什么 fork 后不能只追踪共享 OFD：父子用户态 buffer 是各自的副本，底层 offset 却可能共享。两种状态一起影响读取结果。
+
+**把重定向也连起来。** 假设 `open` 得到 fd 3，执行 `dup2(3, 1)` 后，fd 1 和 fd 3 引用同一个 OFD；再关闭 fd 3，fd 1 仍然有效。随后程序向 stdout 对应的 fd 1 写入，就进入该文件。改变的是 descriptor table 的引用，不是给 printf 更换函数。真正程序还必须检查 open、dup2 的失败，并处理 open 恰好返回 fd 1 的情况，避免误关目标。
+
 ### 更多共享情况
 
 | 操作 | Descriptor / OFD 的变化 | Offset 是否共享？ |
@@ -1189,6 +1212,11 @@ cmp "$demo_dir/input.txt" "$demo_dir/blocks.txt"
 5. fork 前读了 100 bytes，父子之后依次各读 100。子从哪里开始？父 close 后子还能读吗？如果两者独立 open 又怎样？
 6. `FILE *`、fd table 与 OFD 分别保存什么？`int b = fd` 和 `dup(fd)` 有什么区别？
 
+7. Fgets 的数组容量为 4，读 `ABCDE\n` 时为什么需要两次才能取得这行？
+8. 5 bytes 用 `fread(buf, 2, 3, fp)` 读取，返回多少？能否假定下次还会读到 E？
+9. 恰好读完文件全部 bytes 后，feof 为什么可能仍为 0？
+10. Stream 已消费 2 bytes，底层 offset 为什么可能为 6？
+
 **A1.** 相对路径从进程 CWD 开始查找，不是自动从源文件位置开始。CWD 不同，相同字符串可能找到不同位置；绝对路径从根开始，不依赖 CWD。
 
 **A2.** 数组有 1024 bytes 的容量，但第三轮实际只有 452 bytes 新数据。写容量会把本轮无效的尾部也写出。fread 返回 element 数；size 为 4、返回 3 表示 3 个完整的 4-byte elements，共 12 bytes。
@@ -1200,6 +1228,14 @@ cmp "$demo_dir/input.txt" "$demo_dir/blocks.txt"
 **A5.** Fork 后共享 OFD 的 offset。父先读 100..199 后 offset 为 200，子再读 200..299。父 close 只去掉自己的引用，子仍可读。独立 open 一般创建各自 OFD，offset 各自推进。
 
 **A6.** FILE 管理用户态 stream 缓冲与状态；fd table 维护本进程编号到打开对象的映射；OFD 保存 offset、状态标志与实际文件的引用。整数赋值不创建 descriptor，dup 才创建新的引用，且仍共享原 OFD。
+
+**A7.** 每次最多读 3 个输入字符，剩下一格放 NUL；第一次 ABC，第二次 DE 和换行。
+
+**A8.** 返回 2 个完整 element；最后部分 element 已可能被读取，不能假定 E 留给下次。
+
+**A9.** EOF indicator 需要一次读取观察到末尾；成功满足全部请求不一定需要再探测后面是否有数据。
+
+**A10.** 库先预读 6 bytes，再逐个交给应用。未消费的 4 bytes 在用户态 buffer，不能只用 kernel offset 代表 stream 逻辑进度。
 
 ### 参考资料（可选）
 

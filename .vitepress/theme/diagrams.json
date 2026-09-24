@@ -1,0 +1,326 @@
+{
+  "lec06-sockets-pipes-3": {
+    "title": "父子进程各自持有 descriptor 引用",
+    "source": "flowchart TD\nP[\"Parent：fd 0 / 1 / 2\"] --> T[\"同一个 terminal\"]\nC[\"Child：fd 0 / 1 / 2\"] --> T\nC -. \"Child close(0)\" .-> C2[\"Child：移除 fd 0，保留 fd 1 / 2\"]\nP -. \"不受 Child close 影响\" .-> P2[\"Parent：fd 0 仍然有效\"]",
+    "description": "Parent: fd 0 / 1 / 2 ──→ terminal\nChild : fd 0 / 1 / 2 ──→ 同一个 terminal\n\nChild close(0) 后：\nParent: fd 0 仍可输入\nChild : fd 0 的引用已移除，fd 1 / 2 仍可输出",
+    "height": 219.5
+  },
+  "lec06-sockets-pipes-5": {
+    "title": "Queue 暂存尚未消费的数据",
+    "source": "flowchart TD\nn0[\"Producer memory\"]\nn1[\"write\"]\nn2[\"Queue：暂存数据\"]\nn3[\"read\"]\nn4[\"Consumer memory\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "Producer memory → write → queue → read → Consumer memory\n                          ↑\n                    暂存尚未消费的数据",
+    "height": 469.5
+  },
+  "lec06-sockets-pipes-6": {
+    "title": "Socket 是连接两端的通信端点",
+    "source": "flowchart LR\nsubgraph C[Client process]\nCS[Client socket]\nend\nsubgraph S[Server process]\nSS[Connected socket]\nend\nCS <-->|TCP connection| SS",
+    "description": "Client process                                     Server process\n      │                                                  │\n Client socket  ←──────── TCP connection ────────→  Connected socket",
+    "height": 119.5
+  },
+  "lec06-sockets-pipes-7": {
+    "title": "TCP 的两个方向分别传输",
+    "source": "flowchart TD\nCW[Client write] --> CB[Client send buffer] --> N1[Network] --> SR[Server receive buffer] --> SREAD[Server read]\nSW[Server write] --> SB[Server send buffer] --> N2[Network] --> CR[Client receive buffer] --> CREAD[Client read]",
+    "description": "Client write → Client send buffer → network → Server receive buffer → Server read\nClient read  ← Client receive buffer ← network ← Server send buffer ← Server write",
+    "height": 469.5
+  },
+  "lec06-sockets-pipes-8": {
+    "title": "阻塞 read：等待期间 CPU 运行其他工作",
+    "source": "flowchart TD\nA[调用 read] --> B[线程进入等待]\nB --> C[CPU 可以运行其他线程]\nB -->|数据到达或出现 EOF / error| D[线程重新具备运行条件]\nD -->|被调度运行| E[read 返回]",
+    "description": "调用 read → 进入等待 → CPU 可以运行其他线程\n                       ↓ 数据到达或出现 EOF / error\n                 线程可被调度运行 → read 返回",
+    "height": 434.7
+  },
+  "lec06-sockets-pipes-11": {
+    "title": "字节流通过分隔符划分消息",
+    "source": "flowchart LR\nA[\"h e l l o\"] --> Z1[\"NUL：消息 1 结束\"] --> B[\"n e x t\"] --> Z2[\"NUL：消息 2 结束\"]",
+    "description": "h e l l o \\0 n e x t \\0\n└─ message 1 ─┘ └─ message 2 ─┘",
+    "height": 71.5
+  },
+  "lec06-sockets-pipes-14": {
+    "title": "目的端口相同，仍可区分两条连接",
+    "source": "flowchart TD\nA[\"Client A:51000\"] -->|TCP connection 1| S[\"Server B:9000\"]\nB[\"Client A:51001\"] -->|TCP connection 2| S",
+    "description": "A:51000 → B:9000，TCP\nA:51001 → B:9000，TCP",
+    "height": 194.0
+  },
+  "lec06-sockets-pipes-15": {
+    "title": "从地址解析到建立连接",
+    "source": "flowchart TD\nI[\"example.com / 9000 / hints\"] -->|getaddrinfo| L[addrinfo list]\nL --> F[family / type / protocol]\nL --> A[addr / addrlen]\nF -->|socket| FD[sock_fd]\nFD --> C[connect]\nA --> C",
+    "description": "\"example.com\", \"9000\", hints\n            ↓ getaddrinfo\n        addrinfo list\n       ↙             ↘\nfamily/type/protocol  addr/addrlen\n       ↓ socket       ↓ connect\n       └──── sock_fd ─┘",
+    "height": 541.0
+  },
+  "lec06-sockets-pipes-16": {
+    "title": "Listener 接收连接，conn_fd 负责通信",
+    "source": "flowchart TD\nL[\"listen_fd：长期保留\"] -->|accept| A[\"conn_fd_A：与 Client A 读写\"]\nL -->|accept| B[\"conn_fd_B：与 Client B 读写\"]",
+    "description": "listen_fd：接待处，长期保留，用来 accept\n     │\n     ├─ accept → conn_fd_A：与 Client A 读写\n     └─ accept → conn_fd_B：与 Client B 读写",
+    "height": 219.5
+  },
+  "lec06-sockets-pipes-21": {
+    "title": "Short write：从尚未发送的位置继续",
+    "source": "flowchart TD\nn0[\"len = 10，sent = 0\"]\nn1[\"第一次 write 返回 4\"]\nn2[\"sent = 4，剩 6 bytes，从 buf + 4 继续\"]\nn3[\"第二次 write 返回 6\"]\nn4[\"sent = 10，完成\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "总长度 len = 10\n第一次 write 返回 4 → 还剩 6，从 buf + 4 继续\n第二次 write 返回 6 → sent = 10，完成",
+    "height": 495.0
+  },
+  "lec06-sockets-pipes-23": {
+    "title": "串行服务：A 结束后才接收 B",
+    "source": "flowchart TD\nn0[\"accept A\"]\nn1[\"serve A\"]\nn2[\"close A\"]\nn3[\"accept B\"]\nn4[\"serve B\"]\nn5[\"close B\"]\nn0 --> n1 --> n2 --> n3 --> n4 --> n5",
+    "description": "accept A → serve A → close A → accept B → serve B → close B",
+    "height": 569.0
+  },
+  "lec06-sockets-pipes-24": {
+    "title": "Fork 之后，父子承担不同工作",
+    "source": "flowchart TD\nA[Parent accept] --> F[fork]\nF --> P[Parent：管理 listener，继续接收]\nF --> C[Child：处理刚接收的 conn_fd]",
+    "description": "Parent：accept → fork → 管理 listener\nChild ：只处理刚接收的 conn_fd",
+    "height": 296.0
+  },
+  "lec06-sockets-pipes-26": {
+    "title": "立即 wait 会阻塞接收循环",
+    "source": "sequenceDiagram\nparticipant P as Parent\nparticipant A as Child A\nNote over P: accept A\nP->>A: fork A\nNote over P: wait A，暂停接收\nNote over A: serve A\nA-->>P: exit，wait 返回\nNote over P: accept B",
+    "description": "Parent：accept A → fork A → wait A ─────────→ accept B\nChild A：                  serve A → exit",
+    "height": 475.0
+  },
+  "lec06-sockets-pipes-27": {
+    "title": "并发服务：接收循环不等待当前连接结束",
+    "source": "sequenceDiagram\nparticipant P as Parent\nparticipant A as Child A\nparticipant B as Child B\nNote over P: accept A\nP->>A: fork A\nactivate A\nNote over P: accept B\nP->>B: fork B\nactivate B\nNote over P: accept C ...\nNote over A: serve A\nNote over B: serve B\nA-->>P: exit\n deactivate A\nB-->>P: exit\n deactivate B",
+    "description": "Parent ：accept A → fork A → accept B → fork B → accept C ...\nChild A：          serve A ─────────────────────→ exit\nChild B：                              serve B ───────→ exit",
+    "height": 610.0
+  },
+  "lec06-sockets-pipes-28": {
+    "title": "主线程接收，worker 处理连接",
+    "source": "sequenceDiagram\nparticipant M as Main thread\nparticipant W as Worker\nNote over M: accept\nM->>W: pthread_create，交付连接\nNote over M: 继续 accept\nNote over W: read → process → write\nNote over W: close → return",
+    "description": "Main thread：accept → pthread_create → accept → ...\nWorker     ：        read → process → write → close → return",
+    "height": 448.0
+  },
+  "lec06-sockets-pipes-29": {
+    "title": "错误关闭：线程共享 descriptor table",
+    "source": "flowchart TD\nn0[\"Main 把 conn_fd 交给 Worker\"]\nn1[\"Main 立即 close(conn_fd)\"]\nn2[\"Worker 再 read(conn_fd)\"]\nn3[\"该 fd 已关闭，编号甚至可能被复用\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "错误做法：\nMain 把 conn_fd 交给 Worker\nMain 立即 close(conn_fd)\nWorker 再 read(conn_fd) → fd 已关闭，甚至可能被复用",
+    "height": 421.0
+  },
+  "lec06-sockets-pipes-31": {
+    "title": "线程池：队列把请求分配给固定 workers",
+    "source": "flowchart TD\nA[accept] --> Q[Task queue]\nQ --> W1[Worker 1]\nQ --> W2[Worker 2]\nQ --> W3[Worker 3]\nQ --> W4[Worker 4]",
+    "description": "accept → task queue → Worker 1\n                   → Worker 2\n                   → Worker 3\n                   → Worker 4",
+    "height": 270.5
+  },
+  "lec06-sockets-pipes-33": {
+    "title": "Pipe：写端进入，读端取出",
+    "source": "flowchart TD\nn0[\"write：pipe_fd[1]，write end\"]\nn1[\"Kernel pipe buffer\"]\nn2[\"read：pipe_fd[0]，read end\"]\nn0 --> n1 --> n2",
+    "description": "write(pipe_fd[1], ...) → kernel pipe buffer → read(pipe_fd[0], ...)\n        write end                                  read end",
+    "height": 321.5
+  },
+  "lec06-sockets-pipes-35": {
+    "title": "Pipe 传递数据，不传递私有指针",
+    "source": "flowchart TD\nn0[\"Parent 用户内存：msg\"]\nn1[\"write 复制数据到内核\"]\nn2[\"Kernel pipe buffer\"]\nn3[\"read 复制数据到用户内存\"]\nn4[\"Child 用户内存：buf\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "Parent 用户内存里的 msg\n    → write → 内核 pipe buffer\n    → read  → Child 用户内存里的 buf",
+    "height": 469.5
+  },
+  "lec06-sockets-pipes-38": {
+    "title": "先完成写入并关闭写端，再等待 child",
+    "source": "flowchart TD\nsubgraph BAD[错误：形成相互等待]\nW[Parent wait Child] --> R[Child 等待空 pipe 的数据]\nR --> W\nend\nsubgraph GOOD[正确：让数据和 EOF 先到达]\nA[Parent write] --> B[Parent close 写端] --> C[Parent wait Child]\nA --> D[Child read]\nB --> E[所有写端关闭，剩余数据读尽]\nD --> E --> F[Child read 得到 EOF] --> G[Child exit]\nG --> H[Parent wait 返回]\nC --> H\nend",
+    "description": "错误顺序：Parent wait Child → Child read 空 pipe → 双方等待\n正确顺序：Parent write → close 写端 → wait Child\n                           Child read → EOF → exit",
+    "height": 229.38
+  },
+  "lec06-sockets-pipes-40": {
+    "title": "User stack 与 kernel stack",
+    "source": "flowchart TD\nn0[\"用户函数执行：使用 user stack\"]\nn1[\"调用 read 等系统调用：进入内核\"]\nn2[\"内核处理：使用对应 kernel stack\"]\nn3[\"系统调用完成或恢复后返回用户代码\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "用户代码执行函数 → 使用 user stack\n调用 read 等系统调用 → 进入内核，使用对应 kernel stack\n完成或恢复系统调用 → 回到用户代码",
+    "height": 472.0
+  },
+  "lec01-introduction-2": {
+    "title": "相同虚拟地址，各自独立的数据",
+    "source": "flowchart TD\nP[\"Process P：VA 0x200000\"] --> PM[\"P 的物理存储：值 1\"]\nQ[\"Process Q：VA 0x200000\"] --> QM[\"Q 的物理存储：值 1\"]",
+    "description": "Process P：virtual address 0x200000 → P 的物理存储 → 值 1\nProcess Q：virtual address 0x200000 → Q 的物理存储 → 值 1",
+    "height": 171.0
+  },
+  "lec05-files-0": {
+    "title": "文件复制：打开、循环传输、关闭",
+    "source": "flowchart TD\nA[找到 input.txt] --> B[打开文件] --> C[读进内存]\nC --> D[写到 output.txt]\nD -->|还有数据| C\nD -->|读取结束| E[关闭文件]",
+    "description": "找到 input.txt → 打开 → 读进内存 → 写到 output.txt → 关闭\n                         ↑\n                 一次没读完，就继续读",
+    "height": 515.5
+  },
+  "lec05-files-2": {
+    "title": "Read 与 write 之间，数据先经过内存",
+    "source": "flowchart TD\nn0[\"input.txt：A B C D E F\"]\nn1[\"read：本次读取 A B C\"]\nn2[\"程序内存：暂存 A B C\"]\nn3[\"write：写出这次取得的数据\"]\nn4[\"output.txt：A B C\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "input.txt                 程序内存                   output.txt\n A B C D E F   ──read──→   临时存放 A B C   ──write──→   A B C",
+    "height": 495.0
+  },
+  "lec05-files-4": {
+    "title": "打开以后，后续操作使用 stream",
+    "source": "flowchart TD\nn0[\"路径 input.txt\"]\nn1[\"fopen\"]\nn2[\"得到 input：FILE pointer\"]\nn3[\"把 input 交给读取函数\"]\nn4[\"读取函数操作对应 stream\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "路径 \"input.txt\" ──fopen──→ 得到 input\n                              │\n                              └─ 后续把 input 交给读取函数\n                                 函数便知道操作哪个 stream",
+    "height": 469.5
+  },
+  "lec05-files-5": {
+    "title": "Pipe 连接一个程序的输出与另一个的输入",
+    "source": "flowchart TD\nn0[\"hello.txt\"]\nn1[\"cat\"]\nn2[\"cat stdout\"]\nn3[\"Pipe\"]\nn4[\"grep stdin\"]\nn5[\"grep\"]\nn6[\"grep stdout\"]\nn0 --> n1 --> n2 --> n3 --> n4 --> n5 --> n6",
+    "description": "hello.txt → cat → stdout → pipe → stdin → grep → stdout",
+    "height": 668.5
+  },
+  "lec05-files-6": {
+    "title": "内容与数量，保存在不同变量中",
+    "source": "flowchart TD\nF[文件里的字节] --> B[buffer 数组：实际内容]\nR[函数返回值] --> L[length 变量：实际数量]",
+    "description": "文件里的字节 ──→ buffer 数组：实际内容\n函数的返回值 ──→ length 变量：实际数量",
+    "height": 171.0
+  },
+  "lec05-files-13": {
+    "title": "Read 与 write 的数据方向相反",
+    "source": "flowchart LR\nF[文件 / 设备] -->|read：buffer 是输出位置| B[内存 buffer]\nB -->|write：buffer 是输入数据| F",
+    "description": "read:   文件/设备 → buffer       buffer 是输出位置\nwrite:  buffer → 文件/设备       buffer 是输入数据",
+    "height": 82.0
+  },
+  "lec05-files-16": {
+    "title": "Open file description 保存打开状态",
+    "source": "flowchart TD\nO[打开记录] --> F[\"文件：foo.txt\"]\nO --> P[\"进度：offset = 100\"]\nO --> M[\"访问状态：例如只读\"]",
+    "description": "打开记录\n├─ 操作哪个文件？ → foo.txt\n├─ 下次从哪里读？ → offset = 100\n└─ 允许怎样访问？ → 例如只读",
+    "height": 171.0
+  },
+  "lec05-files-17": {
+    "title": "从用户态 stream 到内核打开记录",
+    "source": "flowchart TD\nsubgraph U[用户空间]\nP[FILE pointer] --> F[FILE object / buffered data]\nend\nsubgraph K[内核空间]\nD[\"本进程 fd table：编号 3\"] --> O[Open file description]\nO --> OFFSET[offset]\nO --> FLAGS[status flags]\nO --> FILE[文件对象 / inode 等信息]\nend\nF -->|关联 fd = 3| D",
+    "description": "用户空间：  FILE *fp → FILE object（可包含 buffered data）\n                           │ 关联 fd = 3\n内核空间：  本进程 fd table[3] ──→ open file description\n                                      ├─ offset\n                                      ├─ status flags\n                                      └─ 文件对象 / inode 等信息",
+    "height": 606.0
+  },
+  "lec05-files-18": {
+    "title": "Fork 后，两个表项引用同一个 OFD",
+    "source": "flowchart TD\nP[\"父进程：fd = 3\"] --> PT[\"父进程 table 的第 3 项\"]\nC[\"子进程：fd = 3\"] --> CT[\"子进程 table 的第 3 项\"]\nPT --> O[\"同一个 OFD：offset = 100\"]\nCT --> O",
+    "description": "父进程 fd = 3 → 父进程 table[3] ─┐\n                                ├→ 同一个 OFD，offset = 100\n子进程 fd = 3 → 子进程 table[3] ─┘",
+    "height": 270.5
+  },
+  "lec04-process-1": {
+    "title": "丢失更新：同一链接被后写者覆盖",
+    "source": "flowchart TD\nA[A 写入 6.left] --> N3[节点 3]\nA -->|B 随后覆盖同一链接| B[B 写入 6.left]\nB --> N4[节点 4]\nB -.-> LOST[节点 3 不再通过这条链接连在树上]",
+    "description": "A 写入后：6.left → 节点 3\nB 写入后：6.left → 节点 4      节点 3 不再通过这条链接连在树上",
+    "height": 319.0
+  },
+  "lec04-process-6": {
+    "title": "Fork 一次调用，两条返回路径",
+    "source": "flowchart TD\nF[fork] --> P[\"Parent：PID 100\"]\nF --> C[\"Child：PID 101\"]\nP --> PR[\"返回 child = 101；x = 10\"]\nC --> CR[\"返回 child = 0；x 初始为 10\"]\nCR --> CX[\"Child 修改自己的 x = 11\"]",
+    "description": "fork()\n                  ↙                  ↘\n          Parent (PID 100)        Child (PID 101)\n          child = 101             child = 0\n          x = 10                  x = 10 → 11",
+    "height": 395.5
+  },
+  "lec04-process-8": {
+    "title": "Main 前后还有 C runtime 的工作",
+    "source": "flowchart TD\nn0[\"程序入口\"]\nn1[\"C runtime 准备环境\"]\nn2[\"调用 main\"]\nn3[\"main 返回\"]\nn4[\"正常退出与清理\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "程序入口 → C 运行时准备环境 → 调用 main\n                               ↓ main 返回\n                         正常退出与清理",
+    "height": 469.5
+  },
+  "lec04-process-9": {
+    "title": "Shell 运行前台命令的时序",
+    "source": "sequenceDiagram\nparticipant P as Shell P\nparticipant C as Child C\nP->>C: fork\nNote over P: 获得 C 的 PID\nNote over C: fork 返回 0\nNote over C: exec external command\nNote over P: waitpid(C)，blocked\nNote over C: command runs\nC-->>P: command exits，收集终止状态\nNote over P: wait 返回，显示下一个提示符",
+    "description": "Shell P                         Child C\n  fork ───────────────────────► returns 0\n  receives C's PID              exec external command\n  waitpid(C)                    command runs\n  blocked                       command exits\n  wait returns ◄─────────────── termination collected\n  next prompt",
+    "height": 637.0
+  },
+  "lec04-process-12": {
+    "title": "Runtime 与 OS 分层调度",
+    "source": "flowchart TD\nn0[\"多个 goroutines\"]\nn1[\"Go runtime 分配工作\"]\nn2[\"OS threads\"]\nn3[\"CPU\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "多个 goroutines → Go runtime 分配工作 → OS threads → CPU",
+    "height": 370.0
+  },
+  "lec03-thread-process-1": {
+    "title": "线程状态：等待与排队是两回事",
+    "source": "flowchart TD\nR[Ready] -->|dispatch| X[Running]\nX -->|preemption| R\nX -->|wait for event| B[Blocked]\nB -->|event completes| R\nX -->|finish| T[Terminated]",
+    "description": "Ready ──dispatch──► Running ──wait for event──► Blocked\n  ▲                   │                          │\n  └────preemption──────┘                          │\n  └────────────────event completes───────────────┘\nRunning ──finish──► Terminated",
+    "height": 316.5
+  },
+  "lec03-thread-process-2": {
+    "title": "Join 写出地址，不复制结果对象",
+    "source": "flowchart TD\nW[\"Worker：return job\"] -->|交出地址值| P[\"Main：result 保存该地址\"]\nJ[\"pthread_join 接收 &result\"] -->|写入 result 变量| P\nP -->|指向| O[仍存活的 struct job]",
+    "description": "worker：return job\n           │ 交出一个地址值\n           ▼\nmain：result [这个地址] ─────► 仍存活的 struct job\n         ▲\n         │ join 要往这个变量里写，所以接收 &result",
+    "height": 316.5
+  },
+  "lec03-thread-process-5": {
+    "title": "递归调用依次建立新的 frame",
+    "source": "flowchart TD\nn0[\"main\"]\nn1[\"A(1)\"]\nn2[\"B()\"]\nn3[\"C()\"]\nn4[\"A(2)\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "main → A(1) → B() → C() → A(2)",
+    "height": 469.5
+  },
+  "lec02-concepts-0": {
+    "title": "一轮指令执行",
+    "source": "flowchart TD\nn0[\"PC：下一条指令的位置\"]\nn1[\"Fetch instruction\"]\nn2[\"Decode\"]\nn3[\"Execute\"]\nn4[\"Update state\"]\nn5[\"Next PC\"]\nn0 --> n1 --> n2 --> n3 --> n4 --> n5",
+    "description": "PC → fetch instruction → decode → execute → update state → next PC",
+    "height": 569.0
+  },
+  "lec02-concepts-1": {
+    "title": "地址的含义依赖所在进程",
+    "source": "flowchart TD\nA[\"进程 A：地址 0x20\"] --> AO[A 自己的对象]\nB[\"进程 B：地址 0x20\"] --> BO[B 自己的对象]",
+    "description": "进程 A 使用地址 0x20 → A 自己的某个对象\n进程 B 使用地址 0x20 → B 自己的某个对象",
+    "height": 171.0
+  },
+  "lec02-concepts-2": {
+    "title": "单个 CPU 沿时间复用",
+    "source": "flowchart TD\nn0[\"A 运行\"]\nn1[\"B 运行\"]\nn2[\"A 恢复并继续\"]\nn3[\"C 运行\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "时间 →    A 运行    B 运行    A 继续    C 运行\n同一个 CPU   A   →    B   →     A   →    C",
+    "height": 370.0
+  },
+  "lec02-concepts-5": {
+    "title": "同一个 VA 经不同映射得到不同 PA",
+    "source": "flowchart TD\nA[\"P1：VA = 0x24\"] --> B[\"Base = 0x1000 / Limit = 0x100\"] --> C[\"PA = 0x1024\"]\nD[\"P2：VA = 0x24\"] --> E[\"Base = 0x3000 / Limit = 0x80\"] --> F[\"PA = 0x3024\"]",
+    "description": "P1: Base=0x1000, Limit=0x100, VA=0x24 → PA=0x1024\nP2: Base=0x3000, Limit=0x80,  VA=0x24 → PA=0x3024",
+    "height": 296.0
+  },
+  "lec02-concepts-6": {
+    "title": "入口表把事件映射到 handler",
+    "source": "flowchart TD\nn0[\"事件编号 i\"]\nn1[\"第 i 个入口项\"]\nn2[\"Handler 的入口地址\"]\nn3[\"执行 handler 代码\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "事件编号 i → 第 i 个入口项 → handler 的入口地址 → 执行 handler 代码",
+    "height": 370.0
+  },
+  "stack-vs-heap-0": {
+    "title": "嵌套调用的 stack frames",
+    "source": "flowchart TD\nTOP[Stack pointer / 栈顶] --> B[B frame：局部状态与返回 A 的位置]\nB --> A[A frame：局部状态与返回 main 的位置]\nA --> M[main frame]",
+    "description": "main 调用 A，A 再调用 B：\n\n栈顶 → B 的 frame：B 的局部状态，返回 A 的位置\n       A 的 frame：A 的局部状态，返回 main 的位置\n       main 的 frame",
+    "height": 421.0
+  },
+  "stack-vs-heap-1": {
+    "title": "Pointer 和 heap 对象具有不同生命周期",
+    "source": "flowchart TD\nP[\"局部变量 p：保存地址，生命周期较短\"] --> H[\"分配的 int：42，直到 free 才释放\"]",
+    "description": "函数执行中：\n局部变量 p [地址] ──────► 分配的 int [42]\n       生命周期较短             生命周期由 free 结束",
+    "height": 222.0
+  },
+  "c-pointers-0": {
+    "title": "Pointer 保存另一个对象的地址",
+    "source": "flowchart LR\nP[\"p：保存 x 的地址\"] --> X[\"x：值 9\"]",
+    "description": "p [x 的地址] ──────► x [9]",
+    "height": 71.5
+  },
+  "c-pointers-1": {
+    "title": "双指针允许函数修改调用者的 pointer",
+    "source": "flowchart TD\nO[函数中的 out] -->|指向 pointer 变量| P[p]\nP -. 调用前 .-> X[\"x：7\"]\nP -->|调用后| Y[\"y：99\"]",
+    "description": "调用前：p → x [7]       调用后：p → y [99]\n函数中：out → p",
+    "height": 316.5
+  },
+  "lec06-sockets-pipes-extra-48": {
+    "title": "本讲主线：从隔离到通信",
+    "source": "flowchart TD\nn0[\"独立 address spaces\"]\nn1[\"需要 IPC：普通私有变量不能直接通知另一个进程\"]\nn2[\"Read / write 传输字节\"]\nn3[\"Socket：寻址、连接、双向通信\"]\nn4[\"Process / thread / pool：安排谁处理连接\"]\nn5[\"本机父子进程可用 Pipe：简单单向通道\"]\nn0 --> n1 --> n2 --> n3 --> n4 --> n5",
+    "description": "独立 address spaces\n    ↓ 不能靠修改自己的普通变量通知对方\n需要 IPC\n    ↓ 用 read / write 传输字节\nSocket：解决寻址、连接、双向通信\n    ↓ 同时来了很多客户端\nProcess / thread / thread pool：安排谁处理连接\n    ↓ 如果只是本机父子进程通信\nPipe：建立简单的单向通道",
+    "height": 671.0
+  },
+  "lec06-sockets-pipes-extra-49": {
+    "title": "从 fd 索引到打开的文件",
+    "source": "flowchart TD\nn0[\"程序中的整数：fd = 3\"]\nn1[\"以 fd 为索引，查内核中的本进程 descriptor table\"]\nn2[\"表项引用内核 open file description\"]\nn3[\"找到文件及其数据\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "程序里的整数 fd = 3\n       ↓ 作为索引\n该进程的 file descriptor table（内核中）\n       ↓ 表项引用\nopen file description（内核中）\n       ↓\n文件及其数据",
+    "height": 421.0
+  },
+  "lec06-sockets-pipes-extra-50": {
+    "title": "不同 I/O 对象，共同的操作接口",
+    "source": "flowchart TD\nn0[\"Regular file / terminal / socket / pipe\"]\nn1[\"File descriptor\"]\nn2[\"Read / write / close\"]\nn0 --> n1 --> n2",
+    "description": "Regular file / terminal / socket / pipe\n                    ↓\n       file descriptor + read/write/close",
+    "height": 296.0
+  },
+  "lec05-files-extra-51": {
+    "title": "Open 返回的是本进程的 descriptor",
+    "source": "flowchart TD\nn0[\"open input.txt，以 O_RDONLY 打开\"]\nn1[\"成功返回 3，程序保存 fd = 3\"]\nn2[\"read 的第一个参数传 3\"]\nn3[\"内核查找本进程编号 3 对应的打开文件\"]\nn0 --> n1 --> n2 --> n3",
+    "description": "open(\"input.txt\", O_RDONLY) 返回 3\n                  ↓\n程序保存 fd = 3\n                  ↓\n以后 read(3, ...) 就是在请求：读取本进程编号 3 对应的打开文件",
+    "height": 446.5
+  },
+  "lec04-process-extra-52": {
+    "title": "Exec 替换程序，保留进程身份",
+    "source": "flowchart TD\nn0[\"Exec 前：Child，PID 101，原 C 程序\"]\nn1[\"execv 成功，旧程序映像被替换\"]\nn2[\"Exec 后：仍为 PID 101，开始执行 echo\"]\nn0 --> n1 --> n2",
+    "description": "Exec 前：Child，PID 101，执行原来的 C 程序\n                         ↓ execv 成功\nExec 后：仍是 PID 101，开始执行 echo 程序",
+    "height": 347.0
+  },
+  "lec03-thread-process-extra-53": {
+    "title": "应用通过库与受控接口使用内核服务",
+    "source": "flowchart TD\nn0[\"Application code\"]\nn1[\"普通函数调用：libraries / runtime，通常处于 user mode\"]\nn2[\"需要系统服务时：controlled system call\"]\nn3[\"Kernel：保护、调度、资源管理\"]\nn4[\"Hardware\"]\nn0 --> n1 --> n2 --> n3 --> n4",
+    "description": "Application code\n  ↓ ordinary calls\nLibraries / runtime (mostly user mode)\n  ↓ controlled system calls when needed\nKernel: protection, scheduling, resource management\n  ↓ manages\nHardware",
+    "height": 571.5
+  }
+}

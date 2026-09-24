@@ -22,15 +22,7 @@ next:
 
 **核心问题：调用库函数、进入内核、切换线程分别发生在哪里？**
 
-```text
-Application code
-  ↓ ordinary calls
-Libraries / runtime (mostly user mode)
-  ↓ controlled system calls when needed
-Kernel: protection, scheduling, resource management
-  ↓ manages
-Hardware
-```
+<StudyDiagram id="lec03-thread-process-extra-53" />
 
 ![Unix application, library and kernel layers](../assets/lec03/page03.png)
 
@@ -104,6 +96,22 @@ CPU 可以执行 application、library 或 kernel 的指令。它们是代码与
 
 “Return to user” 是概念动作，不是所有体系结构共有一个名叫 RTU 的指令。真实启动也先经过 firmware / bootloader 等阶段，这里的流程从 OS 已运行开始。
 
+### 从事件找到入口
+
+**核心问题：CPU 被打断以后，为什么能进入正确的 kernel handler？**
+
+可以把受保护的入口表理解成“事件编号 → 处理入口”的映射。下面是教学模型，不代表某个 CPU 的实际编号：
+
+| 事件 | 入口表选项 | 后续工作 |
+|---|---|---|
+| Timer interrupt | Timer handler 的入口 | 更新时间；必要时触发调度 |
+| Invalid memory access | Fault handler 的入口 | 判断是否能够处理，否则终止出错执行 |
+| System call | 受控 syscall 入口 | 检查请求编号、参数和权限，再执行服务 |
+
+顺序是：识别事件 → 通过规定机制进入受信任位置 → 保存现场 → 处理事件 → 恢复执行。入口表由受保护的系统机制管理，用户不能把入口改成自己的任意函数，再借中断取得 kernel 权限。
+
+入口表解决的是“进入哪里”；scheduler 解决的是“接下来运行谁”。进入 handler 后可以恢复原线程，并不必然发生 thread switch。不同架构对 vector、入口表、保存寄存器的规定不同，不能把某个历史机器的表大小当成所有系统的常数。
+
 ### 状态与调度 {#线程状态与调度}
 
 **核心问题：没在运行的线程，是在排队，还是根本还不能运行？**
@@ -115,13 +123,7 @@ CPU 可以执行 application、library 或 kernel 的指令。它们是代码与
 | Blocked / waiting | 等 I/O、lock、join 等条件 | 条件满足前不能 |
 | Terminated | 执行结束，可能仍待回收信息 | 不能 |
 
-```text
-Ready ──dispatch──► Running ──wait for event──► Blocked
-  ▲                   │                          │
-  └────preemption──────┘                          │
-  └────────────────event completes───────────────┘
-Running ──finish──► Terminated
-```
+<StudyDiagram id="lec03-thread-process-1" />
 
 I/O 完成通常使 thread 从 blocked 进入 ready，不保证它立刻获得 CPU。`sleep` 表示等待时间事件，不是“在 CPU 上空转同样长时间”。
 
@@ -213,6 +215,13 @@ Registers 的快照也可能保存在 trap frame / kernel stack 中，不必全�
 
 单核可以重叠“设备等待”和“CPU 计算”，但不能让两条普通线程指令流在同一 execution context 上同时执行。多核则提供真正 parallel execution。
 
+**用时间算一次收益。** 假设设备等待需要 12 ms，另一项独立 CPU 计算需要 8 ms，忽略发起请求与切换的开销：
+
+- 串行：先等设备，再计算，需要约 `12 + 8 = 20 ms`。
+- 重叠：等待期间完成计算，需要约 `max(12, 8) = 12 ms`。
+- 若计算必须使用尚未读回的数据，这两项有依赖，就不能这样重叠。
+- 若两项都是各需 8 ms 的纯 CPU 工作，单核仍需约 16 ms 的 CPU 时间；增加线程还可能增加切换成本。
+
 ## 3. Pthread API {#_3-pthreads-·-创建、传参、等待结果}
 
 **核心问题：怎样创建一个 thread，传给它数据，再安全取得结果？**
@@ -300,14 +309,7 @@ pthread_join(tid, &result);
 
 **把结果传回过程画出来：**
 
-```text
-worker：return job
-           │ 交出一个地址值
-           ▼
-main：result [这个地址] ─────► 仍存活的 struct job
-         ▲
-         │ join 要往这个变量里写，所以接收 &result
-```
+<StudyDiagram id="lec03-thread-process-2" />
 
 - Worker 交出的是 pointer，类型可以统一表示为 `void *`。
 - Main 准备一个 pointer 变量 result 来接收它。
@@ -319,6 +321,20 @@ main：result [这个地址] ─────► 仍存活的 struct job
 ::: tip 基础补充
 对 `p`、`*p`、`&p` 的区别不熟？先读 [C pointers](../foundations/c-pointers.md)。
 :::
+
+### 三种容易混淆的参数传法
+
+**核心问题：传的是一个数，还是某个会变化的对象的地址？**
+
+- **`(void *)t`：转换整数值。** Worker 得到把整数转换成 pointer 后的值。整数与 pointer 的转换依实现，不是通用的对象传参方案。
+- **`&t`：传循环变量的地址。** 各 worker 可能都指向同一个、正在变化的 t；没有同步时还可能构成 data race。
+- **`&jobs[t]`：传各自 job 的地址。** 每个 worker 有自己的参数对象；对象必须持续存活，读写也应遵守同步关系。
+
+所以，整数转换示例不能解释成“所有线程都收到了循环变量的地址”。更清楚的通用写法是准备独立对象，再把对象地址传给 worker。
+
+`pthread_t` 是 API 提供的 thread identifier；程序自定义的 job 编号只是业务标签。`pthread_create(&tid, ...)` 中的 `&tid` 是用于写出 identifier 的地址，不是新线程的 stack pointer。
+
+> 💡 `pthread_exit` 可以让其他线程继续，但不会延长退出线程的局部对象生命周期。如果 main 把自己栈上对象交给 worker，就应在对象仍存活时 join；不能以为 main 调用 `pthread_exit` 后，worker 还可以长期访问 main 的局部数组。
 
 ### 完整示例 {#完整示例-参数与结果由谁持有}
 
@@ -514,9 +530,7 @@ int main(void) { A(1); return 0; }
 
 **暂时不要一次看完所有函数。从 main 开始，每遇到一次调用，就去执行被调用的函数：**
 
-```text
-main → A(1) → B() → C() → A(2)
-```
+<StudyDiagram id="lec03-thread-process-5" />
 
 A 在参数小于 2 时调用 B，随后打印自己的参数。
 
@@ -604,6 +618,9 @@ cc -std=c11 -Wall -Wextra demos/lec03/stack_review.c -o /tmp/os-stack-review
 7. `pthread_create` 为什么接收 `&tid`，而 `pthread_join` 接收 `tid` 和 `&result`？
 8. A(2) 返回后，为什么 A(1) 仍能打印 1？
 
+9. 8 ms 独立计算与 12 ms 设备等待，单核怎样缩短总时间？何时不能重叠？
+10. `(void *)t`、`&t` 与 `&jobs[t]` 的区别是什么？
+
 **A1.** Hardware 提供受控入口并保存最低限度恢复信息；kernel 保存剩余必要现场；scheduler 选择 ready 的 P2；kernel 恢复地址环境和现场后返回 user mode。具体保存分工依 architecture 而异。
 
 **A2.** 完成事件只恢复运行资格。还要经过 scheduler 选择，可能有其他 ready threads 在等待。
@@ -619,6 +636,10 @@ cc -std=c11 -Wall -Wextra demos/lec03/stack_review.c -o /tmp/os-stack-review
 **A7.** Create 要写出 ID，接收 tid 的地址；join 读取已知 ID 来选目标，同时可向 result 写出 worker 返回的 pointer，因此接收 result 的地址。两者的 int 返回值用于报告成功或错误。
 
 **A8.** 两次调用有独立的局部状态与恢复位置。内层 frame 撤销后，外层 frame 的 tmp=1 仍在生命周期内，不会被内层 tmp=2 替代。
+
+**A9.** 独立工作可重叠，忽略开销时从 20 ms 降至约 12 ms；计算依赖未返回的数据时不能这样做，纯 CPU 工作也不会因单核多线程而凭空并行。
+
+**A10.** 第一种转换整数值，转换依实现；第二种指向同一循环变量，涉及变化、同步与生命周期；第三种指向各自对象，但仍需保证对象存活与正确同步。
 
 ## 参考资料（可选）
 
